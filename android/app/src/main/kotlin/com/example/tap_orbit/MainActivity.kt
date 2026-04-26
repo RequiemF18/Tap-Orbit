@@ -14,29 +14,12 @@ import kotlin.math.sin
 
 class MainActivity : FlutterActivity() {
     private val channelName = "tap_orbit/audio"
-    private var enabled = true
-    private var runningMusic = false
-    private var musicTrack: AudioTrack? = null
-    private var musicThread: Thread? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName).setMethodCallHandler { call, result ->
             when (call.method) {
-                "setEnabled" -> {
-                    enabled = call.argument<Boolean>("enabled") ?: true
-                    if (!enabled) stopMusic()
-                    result.success(null)
-                }
-                "startMusic" -> {
-                    startMusic()
-                    result.success(null)
-                }
-                "stopMusic" -> {
-                    stopMusic()
-                    result.success(null)
-                }
                 "play" -> {
                     playSound(call.argument<String>("sound") ?: "tap")
                     result.success(null)
@@ -46,79 +29,7 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    override fun onPause() {
-        super.onPause()
-        stopMusic()
-    }
-
-    override fun onResume() {
-        super.onResume()
-        if (enabled) startMusic()
-    }
-
-    override fun onDestroy() {
-        stopMusic()
-        super.onDestroy()
-    }
-
-    private fun startMusic() {
-        if (!enabled || runningMusic) return
-
-        runningMusic = true
-        musicThread = Thread {
-            val sampleRate = 44100
-            val bufferSize = maxOf(
-                AudioTrack.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT),
-                sampleRate / 2
-            )
-            val track = createTrack(sampleRate, bufferSize)
-            musicTrack = track
-            track.play()
-
-            val notes = intArrayOf(220, 277, 330, 415, 330, 277, 247, 196)
-            val buffer = ShortArray(1024)
-            var sampleIndex = 0L
-
-            while (runningMusic) {
-                for (i in buffer.indices) {
-                    val t = sampleIndex.toDouble() / sampleRate
-                    val beat = ((t * 2.0).toInt()) % notes.size
-                    val note = notes[beat].toDouble()
-                    val pad = sin(2.0 * PI * note * t) * 0.12
-                    val octave = sin(2.0 * PI * note * 2.0 * t) * 0.04
-                    val bass = sin(2.0 * PI * (note / 2.0) * t) * 0.075
-                    val pulse = if (((t * 4.0).toInt() % 2) == 0) 0.025 else 0.0
-                    val sample = (pad + octave + bass + pulse) * 0.28
-                    buffer[i] = (sample.coerceIn(-1.0, 1.0) * Short.MAX_VALUE).toInt().toShort()
-                    sampleIndex++
-                }
-
-                try {
-                    track.write(buffer, 0, buffer.size)
-                } catch (_: Exception) {
-                    runningMusic = false
-                }
-            }
-
-            try {
-                track.stop()
-                track.release()
-            } catch (_: Exception) {}
-        }.also { it.start() }
-    }
-
-    private fun stopMusic() {
-        runningMusic = false
-        try {
-            musicTrack?.pause()
-            musicTrack?.flush()
-        } catch (_: Exception) {}
-        musicTrack = null
-        musicThread = null
-    }
-
     private fun playSound(sound: String) {
-        if (!enabled) return
         Thread {
             when (sound) {
                 "tap" -> tone(intArrayOf(660), 55, 0.22, Wave.SQUARE)

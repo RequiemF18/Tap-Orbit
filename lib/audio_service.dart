@@ -1,3 +1,4 @@
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -8,12 +9,15 @@ class AudioService {
   static const String _enabledKey = 'tap_orbit_audio_enabled';
 
   static bool _enabled = true;
+  static final AudioPlayer _musicPlayer = AudioPlayer();
+
   static bool get enabled => _enabled;
 
   static Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
     _enabled = prefs.getBool(_enabledKey) ?? true;
-    await _safeInvoke('setEnabled', {'enabled': _enabled});
+    await _musicPlayer.setReleaseMode(ReleaseMode.loop);
+    await _musicPlayer.setVolume(1.0);
     if (_enabled) await startMusic();
   }
 
@@ -21,7 +25,6 @@ class AudioService {
     _enabled = !_enabled;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_enabledKey, _enabled);
-    await _safeInvoke('setEnabled', {'enabled': _enabled});
     if (_enabled) {
       await startMusic();
       await playTap();
@@ -32,10 +35,29 @@ class AudioService {
 
   static Future<void> startMusic() async {
     if (!_enabled) return;
-    await _safeInvoke('startMusic');
+    try {
+      await _musicPlayer.play(AssetSource('audio/main_theme.wav'));
+    } catch (_) {}
   }
 
-  static Future<void> stopMusic() async => _safeInvoke('stopMusic');
+  static Future<void> stopMusic() async {
+    try {
+      await _musicPlayer.stop();
+    } catch (_) {}
+  }
+
+  static Future<void> pauseMusic() async {
+    try {
+      await _musicPlayer.pause();
+    } catch (_) {}
+  }
+
+  static Future<void> resumeMusic() async {
+    if (!_enabled) return;
+    try {
+      await _musicPlayer.resume();
+    } catch (_) {}
+  }
 
   static Future<void> playTap() async => _play('tap');
   static Future<void> playHit() async => _play('hit');
@@ -51,11 +73,5 @@ class AudioService {
     } catch (_) {
       await SystemSound.play(SystemSoundType.click);
     }
-  }
-
-  static Future<void> _safeInvoke(String method, [Map<String, Object?>? args]) async {
-    try {
-      await _channel.invokeMethod(method, args);
-    } catch (_) {}
   }
 }
