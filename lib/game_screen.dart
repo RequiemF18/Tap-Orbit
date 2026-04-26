@@ -571,8 +571,7 @@ class _GameScreenState extends State<GameScreen>
     if (distance <= hitWindow) {
       _handleHit(target, distance <= perfectWindow, gatePosition);
     } else {
-      final signed = _signedAngleDifference(target.angle, _currentGateAngle);
-      _handleMiss(signed < 0 ? 'MISS' : 'TOO LATE', target.color);
+      _handleMiss('MISS', target.color);
     }
   }
 
@@ -687,13 +686,6 @@ class _GameScreenState extends State<GameScreen>
   double _angleDistance(double a, double b) {
     var diff = (a - b).abs() % (pi * 2);
     if (diff > pi) diff = pi * 2 - diff;
-    return diff;
-  }
-
-  double _signedAngleDifference(double angle, double target) {
-    var diff = (angle - target) % (pi * 2);
-    if (diff > pi) diff -= pi * 2;
-    if (diff < -pi) diff += pi * 2;
     return diff;
   }
 
@@ -1365,6 +1357,15 @@ class TapOrbitPainter extends CustomPainter {
       color: sunStyle.accent,
       outline: sunStyle.outline,
     );
+    _drawSolarFlares(
+      canvas,
+      center: center,
+      radius: coreRadius * (2.2 + frenzy * 0.35),
+      color: sunStyle.base,
+      outline: sunStyle.accent,
+      rotationOffset: pi / 8,
+      alphaScale: 0.72,
+    );
 
     _drawPlanetSprite(
       canvas,
@@ -1375,14 +1376,6 @@ class TapOrbitPainter extends CustomPainter {
       spin: time * (0.48 + frenzy * 0.35),
       active: true,
     );
-
-    _drawPlanetSparkles(
-      canvas,
-      center: center,
-      radius: coreRadius * (2.0 + frenzy * 0.35),
-      spin: time * 0.95,
-      color: sunStyle.outline,
-    );
   }
 
   void _drawSolarFlares(
@@ -1391,27 +1384,43 @@ class TapOrbitPainter extends CustomPainter {
     required double radius,
     required Color color,
     required Color outline,
+    double rotationOffset = 0,
+    double alphaScale = 1,
   }) {
     const spokes = 8;
     for (int i = 0; i < spokes; i++) {
-      final angle = time * 0.55 + (pi * 2 / spokes) * i;
-      final reach = radius + sin(time * 2.0 + i) * (3 + frenzy * 2);
+      final angle = time * 0.55 + rotationOffset + (pi * 2 / spokes) * i;
+      final pulse = sin(time * 2.0 + i * 0.8) * 0.5 + 0.5;
+      final reach = radius + pulse * (5 + frenzy * 5);
       final point = center + Offset(cos(angle) * reach, sin(angle) * reach);
-      final width = 2.0 + (i.isEven ? frenzy * 0.9 : 0.0);
+      final width = 2.0 + pulse * 1.4 + (i.isEven ? frenzy * 0.9 : 0.0);
+      final flameLength = width * (2.8 + pulse * 1.6 + frenzy * 0.8);
       canvas.drawRect(
         Rect.fromCenter(center: point, width: width, height: width),
         Paint()
-          ..color = color.withOpacity(0.88)
+          ..color = color.withOpacity((0.88 - i * 0.02) * alphaScale)
           ..isAntiAlias = false,
       );
       canvas.drawRect(
         Rect.fromCenter(
           center: point,
-          width: width * 2.6,
-          height: width * 0.85,
+          width: flameLength,
+          height: width * 0.9,
         ),
         Paint()
-          ..color = outline.withOpacity(0.55)
+          ..color = outline.withOpacity((0.55 + pulse * 0.12) * alphaScale)
+          ..isAntiAlias = false,
+      );
+      canvas.drawRect(
+        Rect.fromCenter(
+          center: center +
+              Offset(cos(angle) * (reach - width * 1.1),
+                  sin(angle) * (reach - width * 1.1)),
+          width: flameLength * 0.62,
+          height: width * 0.65,
+        ),
+        Paint()
+          ..color = color.withOpacity((0.62 + pulse * 0.10) * alphaScale)
           ..isAntiAlias = false,
       );
     }
