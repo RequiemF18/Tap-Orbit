@@ -49,6 +49,7 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
   Color _flashColor = Colors.white;
   double _comboPulse = 0;
   double _gatePulse = 0;
+  double _clock = 0;
   double _hintOpacity = 1;
   double _feedbackAge = 1;
   double _cometCooldown = 4;
@@ -225,6 +226,7 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     if (dt <= 0 || dt > 0.05) return;
 
     setState(() {
+      _clock += dt;
       _updateAmbient(dt);
       _updatePlanets(dt);
       _updateParticles(dt);
@@ -538,6 +540,7 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
                     hitWindow: hitWindow,
                     perfectWindow: perfectWindow,
                     gatePulse: _gatePulse,
+                    time: _clock,
                   ),
                 ),
                 SafeArea(
@@ -719,6 +722,7 @@ class TapOrbitPainter extends CustomPainter {
     required this.hitWindow,
     required this.perfectWindow,
     required this.gatePulse,
+    required this.time,
   });
 
   final List<OrbitPlanet> planets;
@@ -736,6 +740,7 @@ class TapOrbitPainter extends CustomPainter {
   final double hitWindow;
   final double perfectWindow;
   final double gatePulse;
+  final double time;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -926,7 +931,15 @@ class TapOrbitPainter extends CustomPainter {
 
       if (!active) continue;
 
+      final rawDistance = _angleDistance(planet.angle, gateAngle);
+      final approach = (1.0 - (rawDistance / 0.9)).clamp(0.0, 1.0);
+      final eased = approach * approach * (3 - 2 * approach);
+
+      final breathing = 0.5 + 0.5 * sin(time * 3.2);
+      final intensity = (0.55 + eased * 0.45 + gatePulse * 0.35).clamp(0.0, 1.4);
+
       final rect = Rect.fromCircle(center: center, radius: radius);
+
       canvas.drawArc(
         rect,
         gateAngle - hitWindow,
@@ -935,10 +948,11 @@ class TapOrbitPainter extends CustomPainter {
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeCap = StrokeCap.round
-          ..strokeWidth = 16 * (1 + gatePulse * 0.40)
-          ..color = color.withOpacity(0.16)
-          ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 18),
+          ..strokeWidth = 22 * (1 + gatePulse * 0.45) + eased * 8
+          ..color = color.withOpacity((0.12 + eased * 0.18 + breathing * 0.04) * intensity)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 22),
       );
+
       canvas.drawArc(
         rect,
         gateAngle - hitWindow,
@@ -947,8 +961,33 @@ class TapOrbitPainter extends CustomPainter {
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeCap = StrokeCap.round
-          ..strokeWidth = 7.5
-          ..color = color.withOpacity(0.95),
+          ..strokeWidth = 11
+          ..color = Colors.black.withOpacity(0.55),
+      );
+
+      canvas.drawArc(
+        rect,
+        gateAngle - hitWindow,
+        hitWindow * 2,
+        false,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round
+          ..strokeWidth = 6
+          ..color = color.withOpacity((0.78 + eased * 0.22).clamp(0.0, 1.0)),
+      );
+
+      canvas.drawArc(
+        rect,
+        gateAngle - perfectWindow,
+        perfectWindow * 2,
+        false,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round
+          ..strokeWidth = 8
+          ..color = Colors.white.withOpacity(0.18 + eased * 0.18)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 6),
       );
       canvas.drawArc(
         rect,
@@ -958,9 +997,10 @@ class TapOrbitPainter extends CustomPainter {
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeCap = StrokeCap.round
-          ..strokeWidth = 3
-          ..color = Colors.white.withOpacity(0.92),
+          ..strokeWidth = 3.2
+          ..color = Colors.white.withOpacity(0.95),
       );
+
       _drawPixelArc(
         canvas,
         center: center,
@@ -971,28 +1011,131 @@ class TapOrbitPainter extends CustomPainter {
         pixel: 4,
       );
 
-      final arrowTip = Offset(
-        center.dx + cos(gateAngle) * (radius + 28),
-        center.dy + sin(gateAngle) * (radius + 28),
-      );
-      final left = Offset(
-        center.dx + cos(gateAngle - 0.10) * (radius + 10),
-        center.dy + sin(gateAngle - 0.10) * (radius + 10),
-      );
-      final right = Offset(
-        center.dx + cos(gateAngle + 0.10) * (radius + 10),
-        center.dy + sin(gateAngle + 0.10) * (radius + 10),
-      );
+      _drawGateBracket(canvas, center, radius, gateAngle - hitWindow, color, isLeft: true);
+      _drawGateBracket(canvas, center, radius, gateAngle + hitWindow, color, isLeft: false);
 
-      canvas.drawPath(
-        Path()
-          ..moveTo(arrowTip.dx, arrowTip.dy)
-          ..lineTo(left.dx, left.dy)
-          ..lineTo(right.dx, right.dy)
-          ..close(),
-        Paint()..color = color.withOpacity(0.92),
-      );
+      _drawTickMark(canvas, center, radius, gateAngle - hitWindow, color, outward: true);
+      _drawTickMark(canvas, center, radius, gateAngle - hitWindow, color, outward: false);
+      _drawTickMark(canvas, center, radius, gateAngle + hitWindow, color, outward: true);
+      _drawTickMark(canvas, center, radius, gateAngle + hitWindow, color, outward: false);
+
+      _drawPerfectMarker(canvas, center, radius, color, eased, breathing);
     }
+  }
+
+  void _drawGateBracket(
+    Canvas canvas,
+    Offset center,
+    double radius,
+    double angle,
+    Color color, {
+    required bool isLeft,
+  }) {
+    final tip = Offset(
+      center.dx + cos(angle) * radius,
+      center.dy + sin(angle) * radius,
+    );
+    final tangent = isLeft ? -1.0 : 1.0;
+    final innerOffset = 7.0;
+    final outerOffset = 7.0;
+    final tangentOffset = 6.0;
+
+    final inner = Offset(
+      center.dx + cos(angle) * (radius - innerOffset),
+      center.dy + sin(angle) * (radius - innerOffset),
+    );
+    final outer = Offset(
+      center.dx + cos(angle) * (radius + outerOffset),
+      center.dy + sin(angle) * (radius + outerOffset),
+    );
+    final tangentAngle = angle + tangent * 0.06;
+    final innerHook = Offset(
+      center.dx + cos(tangentAngle) * (radius - innerOffset + tangentOffset * 0.3),
+      center.dy + sin(tangentAngle) * (radius - innerOffset + tangentOffset * 0.3),
+    );
+    final outerHook = Offset(
+      center.dx + cos(tangentAngle) * (radius + outerOffset - tangentOffset * 0.3),
+      center.dy + sin(tangentAngle) * (radius + outerOffset - tangentOffset * 0.3),
+    );
+
+    final paint = Paint()
+      ..color = color.withOpacity(0.95)
+      ..strokeWidth = 2.4
+      ..strokeCap = StrokeCap.square
+      ..style = PaintingStyle.stroke;
+
+    canvas.drawLine(inner, outer, paint);
+    canvas.drawLine(inner, innerHook, paint);
+    canvas.drawLine(outer, outerHook, paint);
+
+    canvas.drawRect(
+      Rect.fromCenter(center: tip, width: 4, height: 4),
+      Paint()
+        ..color = color
+        ..isAntiAlias = false,
+    );
+  }
+
+  void _drawTickMark(
+    Canvas canvas,
+    Offset center,
+    double radius,
+    double angle,
+    Color color, {
+    required bool outward,
+  }) {
+    final offset = outward ? 14.0 : -14.0;
+    final pos = Offset(
+      center.dx + cos(angle) * (radius + offset),
+      center.dy + sin(angle) * (radius + offset),
+    );
+    canvas.drawRect(
+      Rect.fromCenter(center: pos, width: 3, height: 3),
+      Paint()
+        ..color = color.withOpacity(0.55)
+        ..isAntiAlias = false,
+    );
+  }
+
+  void _drawPerfectMarker(
+    Canvas canvas,
+    Offset center,
+    double radius,
+    Color color,
+    double eased,
+    double breathing,
+  ) {
+    final outerR = radius + 22 + breathing * 2;
+    final markerCenter = Offset(
+      center.dx + cos(gateAngle) * outerR,
+      center.dy + sin(gateAngle) * outerR,
+    );
+    final size = 5.0 + eased * 2.5;
+
+    canvas.drawCircle(
+      markerCenter,
+      size * 2.4,
+      Paint()
+        ..color = color.withOpacity(0.30 + eased * 0.30)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 8),
+    );
+
+    final path = Path()
+      ..moveTo(markerCenter.dx, markerCenter.dy - size)
+      ..lineTo(markerCenter.dx + size, markerCenter.dy)
+      ..lineTo(markerCenter.dx, markerCenter.dy + size)
+      ..lineTo(markerCenter.dx - size, markerCenter.dy)
+      ..close();
+
+    canvas.drawPath(path, Paint()..color = color.withOpacity(0.98));
+
+    final inner = Path()
+      ..moveTo(markerCenter.dx, markerCenter.dy - size * 0.45)
+      ..lineTo(markerCenter.dx + size * 0.45, markerCenter.dy)
+      ..lineTo(markerCenter.dx, markerCenter.dy + size * 0.45)
+      ..lineTo(markerCenter.dx - size * 0.45, markerCenter.dy)
+      ..close();
+    canvas.drawPath(inner, Paint()..color = Colors.white.withOpacity(0.92));
   }
 
   void _paintCenterStar(Canvas canvas, Offset center, Size size) {
