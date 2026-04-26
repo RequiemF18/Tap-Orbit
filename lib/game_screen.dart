@@ -220,7 +220,7 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     final impact = Offset(center.dx + cos(planet.angle) * radius, center.dy + sin(planet.angle) * radius);
     for (int i = 0; i < 12; i++) {
       final angle = (pi * 2 / 12) * i;
-      final speed = 120 + (i % 3) * 35;
+      final double speed = 120.0 + (i % 3) * 35.0;
       _particles.add(HitParticle(position: impact, velocity: Offset(cos(angle), sin(angle)) * speed, color: planet.color, duration: 0.4));
     }
   }
