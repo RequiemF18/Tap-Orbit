@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'audio_service.dart';
 import 'game_screen.dart';
 
 void main() async {
@@ -18,6 +19,8 @@ void main() async {
       systemNavigationBarIconBrightness: Brightness.light,
     ),
   );
+
+  await AudioService.init();
 
   runApp(const TapOrbitApp());
 }
