@@ -18,16 +18,21 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
   static const int maxLives = 3;
   static const int maxPlanets = 4;
   static const double gateAngle = -pi / 2;
-  static const double hitWindow = 0.36;
-  static const double perfectWindow = 0.14;
+  static const double hitWindow = 0.34;
+  static const double perfectWindow = 0.12;
 
   late final Ticker _ticker;
+  final Random _random = Random(42);
+
   Duration _lastElapsed = Duration.zero;
   Size _screenSize = Size.zero;
+  Size _backgroundSize = Size.zero;
 
   final List<OrbitPlanet> _planets = [];
   final List<HitParticle> _particles = [];
   final List<TapRipple> _ripples = [];
+  final List<BackgroundStar> _stars = [];
+  final List<BackgroundPlanet> _backgroundPlanets = [];
 
   int _score = 0;
   int _lives = maxLives;
@@ -42,16 +47,16 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
   double _comboPulse = 0;
   double _gatePulse = 0;
   double _hintOpacity = 1;
-  double _feedbackAge = 2;
+  double _feedbackAge = 1;
   String _feedbackText = '';
   Color _feedbackColor = Colors.white;
   bool _gameEnded = false;
 
   final List<Color> _planetColors = const [
-    Color(0xFF00E5FF),
-    Color(0xFFFF2BD6),
-    Color(0xFFB6FF00),
-    Color(0xFFFFB300),
+    Color(0xFF56E7FF),
+    Color(0xFFFF5AD6),
+    Color(0xFFBFFF4D),
+    Color(0xFFFFC14D),
   ];
 
   @override
@@ -82,10 +87,64 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     _comboPulse = 0;
     _gatePulse = 0;
     _hintOpacity = 1;
-    _feedbackAge = 2;
+    _feedbackAge = 1;
     _feedbackText = '';
+    _feedbackColor = Colors.white;
     _gameEnded = false;
     _addPlanet();
+  }
+
+  void _generateBackground(Size size) {
+    _backgroundSize = size;
+    _stars.clear();
+    _backgroundPlanets.clear();
+
+    for (int i = 0; i < 140; i++) {
+      final layer = _random.nextInt(3);
+      _stars.add(
+        BackgroundStar(
+          position: Offset(_random.nextDouble() * size.width, _random.nextDouble() * size.height),
+          size: layer == 0 ? 1.4 : (layer == 1 ? 2.2 : 3.2),
+          baseOpacity: layer == 0 ? 0.24 : (layer == 1 ? 0.42 : 0.62),
+          phase: _random.nextDouble() * pi * 2,
+          twinkleSpeed: 0.9 + _random.nextDouble() * 2.4,
+          cross: _random.nextDouble() > 0.88,
+        ),
+      );
+    }
+
+    final s = min(size.width, size.height);
+    _backgroundPlanets.addAll([
+      BackgroundPlanet(
+        center: Offset(size.width * 0.15, size.height * 0.18),
+        radius: s * 0.08,
+        base: const Color(0xFF3856FF),
+        shadow: const Color(0xFF17205E),
+        light: const Color(0xFFA6B6FF),
+        pixelSize: 4,
+        ring: true,
+        ringColor: const Color(0xFF9ACBFF),
+      ),
+      BackgroundPlanet(
+        center: Offset(size.width * 0.88, size.height * 0.28),
+        radius: s * 0.11,
+        base: const Color(0xFF7F2AFF),
+        shadow: const Color(0xFF310C6A),
+        light: const Color(0xFFC9A5FF),
+        pixelSize: 5,
+        ring: false,
+      ),
+      BackgroundPlanet(
+        center: Offset(size.width * 0.84, size.height * 0.82),
+        radius: s * 0.09,
+        base: const Color(0xFFFFA531),
+        shadow: const Color(0xFF8A4B00),
+        light: const Color(0xFFFFD388),
+        pixelSize: 4,
+        ring: true,
+        ringColor: const Color(0xFFFFE4B5),
+      ),
+    ]);
   }
 
   void _addPlanet() {
@@ -109,15 +168,18 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     if (dt <= 0 || dt > 0.05) return;
 
     setState(() {
+      for (final star in _stars) {
+        star.phase += dt * star.twinkleSpeed;
+      }
       _updatePlanets(dt);
       _updateParticles(dt);
       _updateRipples(dt);
-      _flashOpacity = max(0, _flashOpacity - dt / 0.2);
+      _flashOpacity = max(0, _flashOpacity - dt / 0.20);
       _comboPulse = max(0, _comboPulse - dt / 0.28);
       _gatePulse = max(0, _gatePulse - dt / 0.22);
       _feedbackAge += dt;
       if (_totalHits > 0 || _lives < maxLives) {
-        _hintOpacity = max(0, _hintOpacity - dt / 1.3);
+        _hintOpacity = max(0, _hintOpacity - dt / 1.4);
       }
     });
   }
@@ -164,7 +226,7 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     final gatePosition = Offset(center.dx + cos(gateAngle) * radius, center.dy + sin(gateAngle) * radius);
 
     _ripples.add(TapRipple(color: target.color, radius: radius));
-    _gatePulse = 1;
+    _gatePulse = 1.0;
 
     if (distance <= hitWindow) {
       _handleHit(target, distance <= perfectWindow, gatePosition);
@@ -180,14 +242,13 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     _bestCombo = max(_bestCombo, _hitStreak);
     final comboBonus = _hitStreak >= 3 ? 2 : 1;
     _score += perfect ? comboBonus + 1 : comboBonus;
-
     _flashColor = Colors.white;
     _flashOpacity = perfect ? 0.38 : 0.26;
     _feedbackText = perfect ? 'PERFECT' : 'NICE';
     _feedbackColor = planet.color;
     _feedbackAge = 0;
     if (_hitStreak == 3 || _hitStreak % 5 == 0 || perfect) _comboPulse = 1.0;
-    _spawnBurst(impact, planet.color, perfect ? 18 : 12);
+    _spawnBurst(impact, planet.color, perfect ? 30 : 20, outwardPower: perfect ? 190 : 145);
 
     if (_totalHits % 3 == 0) {
       for (final p in _planets) {
@@ -204,13 +265,12 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     _hitStreak = 0;
     _lives--;
     _flashColor = Colors.red;
-    _flashOpacity = 0.4;
+    _flashOpacity = 0.40;
     _feedbackText = message;
     _feedbackColor = Colors.redAccent;
     _feedbackAge = 0;
     if (_screenSize != Size.zero) {
-      final center = _screenSize.center(Offset.zero);
-      _spawnBurst(center, color.withOpacity(0.7), 8);
+      _spawnBurst(_screenSize.center(Offset.zero), color.withOpacity(0.8), 12, outwardPower: 105);
     }
     if (_lives <= 0) _endGame();
   }
@@ -228,11 +288,19 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     );
   }
 
-  void _spawnBurst(Offset impact, Color color, int count) {
+  void _spawnBurst(Offset impact, Color color, int count, {required double outwardPower}) {
     for (int i = 0; i < count; i++) {
       final angle = (pi * 2 / count) * i;
-      final double speed = 125.0 + (i % 4) * 34.0;
-      _particles.add(HitParticle(position: impact, velocity: Offset(cos(angle), sin(angle)) * speed, color: color, duration: 0.42));
+      final speed = outwardPower + (i % 4) * 28.0;
+      _particles.add(
+        HitParticle(
+          position: impact,
+          velocity: Offset(cos(angle), sin(angle)) * speed,
+          color: color,
+          duration: 0.45,
+          size: (i % 3 == 0) ? 4.0 : 3.0,
+        ),
+      );
     }
   }
 
@@ -271,7 +339,10 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
       backgroundColor: Colors.black,
       body: LayoutBuilder(
         builder: (context, constraints) {
-          _screenSize = Size(constraints.maxWidth, constraints.maxHeight);
+          final newSize = Size(constraints.maxWidth, constraints.maxHeight);
+          _screenSize = newSize;
+          if (_backgroundSize != newSize || _stars.isEmpty) _generateBackground(newSize);
+
           return GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTapDown: (_) => _onTap(),
@@ -283,6 +354,8 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
                     planets: _planets,
                     particles: _particles,
                     ripples: _ripples,
+                    stars: _stars,
+                    backgroundPlanets: _backgroundPlanets,
                     lives: _lives,
                     flashColor: _flashColor,
                     flashOpacity: _flashOpacity,
@@ -294,77 +367,51 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
                   ),
                 ),
                 SafeArea(
-                  child: Align(
-                    alignment: Alignment.topCenter,
-                    child: Padding(
-                      padding: const EdgeInsets.only(top: 18),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            '$_score',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 54,
-                              fontWeight: FontWeight.w800,
-                              height: 1,
-                              shadows: [Shadow(color: Colors.white54, blurRadius: 16)],
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          AnimatedOpacity(
-                            opacity: comboActive ? 1 : 0,
-                            duration: const Duration(milliseconds: 140),
-                            child: Transform.scale(
-                              scale: comboScale,
-                              child: Text(
-                                'COMBO x2  $_hitStreak',
-                                style: TextStyle(
-                                  color: activeColor,
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.w800,
-                                  letterSpacing: 2.4,
-                                  shadows: [Shadow(color: activeColor, blurRadius: 18)],
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-                SafeArea(
-                  child: Align(
-                    alignment: Alignment.bottomCenter,
-                    child: Padding(
-                      padding: const EdgeInsets.only(bottom: 88, left: 28, right: 28),
-                      child: AnimatedOpacity(
-                        opacity: _hintOpacity,
-                        duration: const Duration(milliseconds: 250),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 12, left: 16, right: 16),
+                    child: Column(
+                      children: [
+                        Row(
                           children: [
-                            Text(
-                              'TAP WHEN THE PLANET ENTERS THE GATE',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: activeColor,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w900,
-                                letterSpacing: 1.5,
-                                shadows: [Shadow(color: activeColor, blurRadius: 18)],
+                            _PixelPanel(
+                              borderColor: activeColor,
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text('SCORE', style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.w800, letterSpacing: 1.5)),
+                                  const SizedBox(height: 2),
+                                  Text('$_score', style: const TextStyle(color: Colors.white, fontSize: 34, fontWeight: FontWeight.w900, height: 1, shadows: [Shadow(color: Colors.white54, blurRadius: 12)])),
+                                ],
                               ),
                             ),
-                            const SizedBox(height: 6),
-                            const Text(
-                              'Hit the glowing arc at the top',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w600),
+                            const Spacer(),
+                            _PixelPanel(
+                              borderColor: Colors.white54,
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                children: [
+                                  const Text('BEST', style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.w800, letterSpacing: 1.5)),
+                                  const SizedBox(height: 2),
+                                  Text('$_personalBest', style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.w900, height: 1)),
+                                ],
+                              ),
                             ),
                           ],
                         ),
-                      ),
+                        const SizedBox(height: 10),
+                        AnimatedOpacity(
+                          opacity: comboActive ? 1 : 0,
+                          duration: const Duration(milliseconds: 140),
+                          child: Transform.scale(
+                            scale: comboScale,
+                            child: _PixelPanel(
+                              borderColor: activeColor,
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                              child: Text('COMBO x2  $_hitStreak', style: TextStyle(color: activeColor, fontSize: 16, fontWeight: FontWeight.w900, letterSpacing: 1.8, shadows: [Shadow(color: activeColor, blurRadius: 16)])),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -374,15 +421,32 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
                       opacity: feedbackVisible ? 1 : 0,
                       duration: const Duration(milliseconds: 80),
                       child: Transform.scale(
-                        scale: 1.0 + (1.0 - _feedbackAge.clamp(0, 0.65) / 0.65) * 0.15,
+                        scale: 1.0 + (1.0 - _feedbackAge.clamp(0.0, 0.65) / 0.65) * 0.14,
                         child: Text(
                           _feedbackText,
-                          style: TextStyle(
-                            color: _feedbackColor,
-                            fontSize: 34,
-                            fontWeight: FontWeight.w900,
-                            letterSpacing: 2.5,
-                            shadows: [Shadow(color: _feedbackColor, blurRadius: 24)],
+                          style: TextStyle(color: _feedbackColor, fontSize: 34, fontWeight: FontWeight.w900, letterSpacing: 2.4, shadows: [Shadow(color: _feedbackColor, blurRadius: 24)]),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                SafeArea(
+                  child: Align(
+                    alignment: Alignment.bottomCenter,
+                    child: Padding(
+                      padding: const EdgeInsets.only(left: 16, right: 16, bottom: 78),
+                      child: AnimatedOpacity(
+                        opacity: _hintOpacity,
+                        duration: const Duration(milliseconds: 250),
+                        child: _PixelPanel(
+                          borderColor: activeColor,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text('TAP WHEN THE PLANET ENTERS THE GATE', textAlign: TextAlign.center, style: TextStyle(color: activeColor, fontSize: 13, fontWeight: FontWeight.w900, letterSpacing: 1.1, shadows: [Shadow(color: activeColor, blurRadius: 14)])),
+                              const SizedBox(height: 5),
+                              const Text('Hit the glowing arc at the top', textAlign: TextAlign.center, style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w700)),
+                            ],
                           ),
                         ),
                       ),
@@ -403,6 +467,8 @@ class TapOrbitPainter extends CustomPainter {
     required this.planets,
     required this.particles,
     required this.ripples,
+    required this.stars,
+    required this.backgroundPlanets,
     required this.lives,
     required this.flashColor,
     required this.flashOpacity,
@@ -416,6 +482,8 @@ class TapOrbitPainter extends CustomPainter {
   final List<OrbitPlanet> planets;
   final List<HitParticle> particles;
   final List<TapRipple> ripples;
+  final List<BackgroundStar> stars;
+  final List<BackgroundPlanet> backgroundPlanets;
   final int lives;
   final Color flashColor;
   final double flashOpacity;
@@ -428,9 +496,11 @@ class TapOrbitPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final center = size.center(Offset.zero);
-    canvas.drawRect(Offset.zero & size, Paint()..color = Colors.black);
-    _paintOrbitsAndGates(canvas, size, center);
-    _paintStar(canvas, center, size);
+    _paintBackground(canvas, size);
+    _paintBackgroundPlanets(canvas);
+    _paintStars(canvas);
+    _paintOrbitGates(canvas, size, center);
+    _paintCenterStar(canvas, center, size);
     _paintRipples(canvas, center);
     _paintPlanetTrails(canvas);
     _paintPlanets(canvas, size, center);
@@ -439,75 +509,77 @@ class TapOrbitPainter extends CustomPainter {
     if (flashOpacity > 0) canvas.drawRect(Offset.zero & size, Paint()..color = flashColor.withOpacity(flashOpacity));
   }
 
-  void _paintOrbitsAndGates(Canvas canvas, Size size, Offset center) {
-    for (final planet in planets) {
-      final active = planet.index == targetIndex;
-      final radius = _orbitRadiusFor(planet.index, size);
-      final color = planet.color;
+  void _paintBackground(Canvas canvas, Size size) {
+    canvas.drawRect(Offset.zero & size, Paint()..color = const Color(0xFF03040A));
+    canvas.drawCircle(Offset(size.width * 0.2, size.height * 0.22), 95, Paint()..color = const Color(0xFF233B8F).withOpacity(0.10)..maskFilter = const MaskFilter.blur(BlurStyle.normal, 70));
+    canvas.drawCircle(Offset(size.width * 0.82, size.height * 0.74), 115, Paint()..color = const Color(0xFF7B2F8F).withOpacity(0.09)..maskFilter = const MaskFilter.blur(BlurStyle.normal, 85));
+  }
 
-      canvas.drawCircle(
-        center,
-        radius,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = active ? 1.5 : 0.8
-          ..color = color.withOpacity(active ? 0.25 : 0.10),
-      );
-
-      if (active) {
-        final rect = Rect.fromCircle(center: center, radius: radius);
-        final pulse = 1.0 + gatePulse * 0.5;
-        final gateGlow = Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeCap = StrokeCap.round
-          ..strokeWidth = 18 * pulse
-          ..color = color.withOpacity(0.16)
-          ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 18);
-        final gate = Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeCap = StrokeCap.round
-          ..strokeWidth = 8 * pulse
-          ..color = color.withOpacity(0.95);
-        final perfectGate = Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeCap = StrokeCap.round
-          ..strokeWidth = 3
-          ..color = Colors.white.withOpacity(0.9);
-
-        canvas.drawArc(rect, gateAngle - hitWindow, hitWindow * 2, false, gateGlow);
-        canvas.drawArc(rect, gateAngle - hitWindow, hitWindow * 2, false, gate);
-        canvas.drawArc(rect, gateAngle - perfectWindow, perfectWindow * 2, false, perfectGate);
-
-        final arrowTip = Offset(center.dx + cos(gateAngle) * (radius + 24), center.dy + sin(gateAngle) * (radius + 24));
-        final left = Offset(center.dx + cos(gateAngle - 0.11) * (radius + 8), center.dy + sin(gateAngle - 0.11) * (radius + 8));
-        final right = Offset(center.dx + cos(gateAngle + 0.11) * (radius + 8), center.dy + sin(gateAngle + 0.11) * (radius + 8));
-        final path = Path()..moveTo(arrowTip.dx, arrowTip.dy)..lineTo(left.dx, left.dy)..lineTo(right.dx, right.dy)..close();
-        canvas.drawPath(path, Paint()..color = color.withOpacity(0.9));
+  void _paintStars(Canvas canvas) {
+    for (final star in stars) {
+      final twinkle = 0.65 + (sin(star.phase) * 0.35 + 0.35).clamp(0.0, 1.0) * 0.6;
+      final paint = Paint()..color = Colors.white.withOpacity((star.baseOpacity * twinkle).clamp(0.0, 1.0))..isAntiAlias = false;
+      final s = star.size;
+      final x = star.position.dx;
+      final y = star.position.dy;
+      canvas.drawRect(Rect.fromLTWH(x, y, s, s), paint);
+      if (star.cross) {
+        canvas.drawRect(Rect.fromLTWH(x - s, y, s * 3, s), paint);
+        canvas.drawRect(Rect.fromLTWH(x, y - s, s, s * 3), paint);
       }
     }
   }
 
-  void _paintStar(Canvas canvas, Offset center, Size size) {
-    final coreRadius = min(size.width, size.height) * 0.035;
-    canvas.drawCircle(center, coreRadius * 3.4, Paint()..color = Colors.white.withOpacity(0.2)..maskFilter = const MaskFilter.blur(BlurStyle.outer, 36));
-    canvas.drawCircle(center, coreRadius * 2.4, Paint()..color = const Color(0xFFFFF176).withOpacity(0.45)..maskFilter = const MaskFilter.blur(BlurStyle.outer, 26));
-    canvas.drawCircle(center, coreRadius * 1.7, Paint()..color = const Color(0xFFFF8A00).withOpacity(0.55)..maskFilter = const MaskFilter.blur(BlurStyle.outer, 18));
-    canvas.drawCircle(center, coreRadius, Paint()..shader = const RadialGradient(colors: [Colors.white, Color(0xFFFFF176), Color(0xFFFF9800)]).createShader(Rect.fromCircle(center: center, radius: coreRadius * 1.2)));
+  void _paintBackgroundPlanets(Canvas canvas) {
+    for (final planet in backgroundPlanets) {
+      canvas.drawCircle(planet.center, planet.radius + 16, Paint()..color = planet.base.withOpacity(0.14)..maskFilter = const MaskFilter.blur(BlurStyle.outer, 20));
+      _drawPixelPlanet(canvas, center: planet.center, radius: planet.radius, base: planet.base.withOpacity(0.9), shadow: planet.shadow.withOpacity(0.95), light: planet.light.withOpacity(0.95), pixel: planet.pixelSize);
+      if (planet.ring) {
+        canvas.save();
+        canvas.translate(planet.center.dx, planet.center.dy);
+        canvas.rotate(-0.35);
+        canvas.scale(1.35, 0.55);
+        canvas.drawCircle(Offset.zero, planet.radius + 12, Paint()..style = PaintingStyle.stroke..color = (planet.ringColor ?? Colors.white).withOpacity(0.35)..strokeWidth = 1.6);
+        canvas.restore();
+      }
+    }
+  }
+
+  void _paintOrbitGates(Canvas canvas, Size size, Offset center) {
+    for (final planet in planets) {
+      final active = planet.index == targetIndex;
+      final radius = _orbitRadiusFor(planet.index, size);
+      final color = planet.color;
+      canvas.drawCircle(center, radius, Paint()..style = PaintingStyle.stroke..strokeWidth = active ? 1.5 : 0.8..color = color.withOpacity(active ? 0.20 : 0.08));
+      if (!active) continue;
+
+      final rect = Rect.fromCircle(center: center, radius: radius);
+      canvas.drawArc(rect, gateAngle - hitWindow, hitWindow * 2, false, Paint()..style = PaintingStyle.stroke..strokeCap = StrokeCap.round..strokeWidth = 16 * (1 + gatePulse * 0.40)..color = color.withOpacity(0.16)..maskFilter = const MaskFilter.blur(BlurStyle.outer, 18));
+      canvas.drawArc(rect, gateAngle - hitWindow, hitWindow * 2, false, Paint()..style = PaintingStyle.stroke..strokeCap = StrokeCap.round..strokeWidth = 7.5..color = color.withOpacity(0.95));
+      canvas.drawArc(rect, gateAngle - perfectWindow, perfectWindow * 2, false, Paint()..style = PaintingStyle.stroke..strokeCap = StrokeCap.round..strokeWidth = 3..color = Colors.white.withOpacity(0.92));
+      _drawPixelArc(canvas, center: center, radius: radius, start: gateAngle - hitWindow, sweep: hitWindow * 2, color: color, pixel: 4);
+
+      final arrowTip = Offset(center.dx + cos(gateAngle) * (radius + 28), center.dy + sin(gateAngle) * (radius + 28));
+      final left = Offset(center.dx + cos(gateAngle - 0.10) * (radius + 10), center.dy + sin(gateAngle - 0.10) * (radius + 10));
+      final right = Offset(center.dx + cos(gateAngle + 0.10) * (radius + 10), center.dy + sin(gateAngle + 0.10) * (radius + 10));
+      canvas.drawPath(Path()..moveTo(arrowTip.dx, arrowTip.dy)..lineTo(left.dx, left.dy)..lineTo(right.dx, right.dy)..close(), Paint()..color = color.withOpacity(0.92));
+    }
+  }
+
+  void _paintCenterStar(Canvas canvas, Offset center, Size size) {
+    final coreRadius = min(size.width, size.height) * 0.04;
+    canvas.drawCircle(center, coreRadius * 3.6, Paint()..color = Colors.white.withOpacity(0.12)..maskFilter = const MaskFilter.blur(BlurStyle.outer, 24));
+    canvas.drawCircle(center, coreRadius * 2.3, Paint()..color = const Color(0xFFFFCB47).withOpacity(0.16)..maskFilter = const MaskFilter.blur(BlurStyle.outer, 18));
+    _drawPixelPlanet(canvas, center: center, radius: coreRadius, base: const Color(0xFFFFB347), shadow: const Color(0xFFCC6A00), light: const Color(0xFFFFF1A8), pixel: 3);
   }
 
   void _paintRipples(Canvas canvas, Offset center) {
     for (final ripple in ripples) {
       final t = (ripple.age / ripple.duration).clamp(0.0, 1.0);
+      final radius = lerpDouble(18, ripple.radius, t) ?? ripple.radius;
       final opacity = 1.0 - t;
-      canvas.drawCircle(
-        center,
-        lerpDouble(18, ripple.radius, t) ?? ripple.radius,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = lerpDouble(7, 2, t) ?? 2
-          ..color = ripple.color.withOpacity(opacity * 0.75)
-          ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 8),
-      );
+      canvas.drawCircle(center, radius, Paint()..style = PaintingStyle.stroke..strokeWidth = lerpDouble(10, 3, t) ?? 3..color = ripple.color.withOpacity(opacity * 0.25)..maskFilter = const MaskFilter.blur(BlurStyle.outer, 10));
+      _drawPixelRing(canvas, center: center, radius: radius, color: ripple.color.withOpacity(opacity * 0.9), pixel: 3);
     }
   }
 
@@ -515,7 +587,9 @@ class TapOrbitPainter extends CustomPainter {
     for (final planet in planets) {
       for (int i = 0; i < planet.trail.length; i++) {
         final t = planet.trail.length == 1 ? 1.0 : i / (planet.trail.length - 1);
-        canvas.drawCircle(planet.trail[i], lerpDouble(2.2, 6.0, t) ?? 3, Paint()..color = planet.color.withOpacity((lerpDouble(0.1, 1.0, t) ?? 0.1) * 0.32));
+        final size = lerpDouble(2, 5.5, t) ?? 3;
+        final opacity = lerpDouble(0.08, 0.55, t) ?? 0.2;
+        canvas.drawRect(Rect.fromCenter(center: planet.trail[i], width: size, height: size), Paint()..color = planet.color.withOpacity(opacity)..isAntiAlias = false);
       }
     }
   }
@@ -525,18 +599,21 @@ class TapOrbitPainter extends CustomPainter {
       final active = planet.index == targetIndex;
       final orbitRadius = _orbitRadiusFor(planet.index, size);
       final position = Offset(center.dx + cos(planet.angle) * orbitRadius, center.dy + sin(planet.angle) * orbitRadius);
-      final bodyRadius = active ? 8.0 : 6.2;
-      canvas.drawCircle(position, active ? 20 : 14, Paint()..color = planet.color.withOpacity(active ? 0.30 : 0.18)..maskFilter = const MaskFilter.blur(BlurStyle.outer, 18));
-      canvas.drawCircle(position, active ? 12 : 9, Paint()..color = planet.color.withOpacity(active ? 0.55 : 0.38)..maskFilter = const MaskFilter.blur(BlurStyle.outer, 10));
-      canvas.drawCircle(position, bodyRadius, Paint()..color = planet.color);
-      canvas.drawCircle(position + const Offset(-2.4, -2.4), 1.8, Paint()..color = Colors.white.withOpacity(0.82));
+      canvas.drawCircle(position, active ? 22 : 16, Paint()..color = planet.color.withOpacity(active ? 0.28 : 0.16)..maskFilter = const MaskFilter.blur(BlurStyle.outer, 16));
+      _drawPixelPlanet(canvas, center: position, radius: active ? 9 : 7, base: planet.color, shadow: _darken(planet.color, 0.45), light: _lighten(planet.color, 0.40), pixel: 2.5);
+      if (active) canvas.drawCircle(position, 14, Paint()..style = PaintingStyle.stroke..strokeWidth = 1.5..color = Colors.white.withOpacity(0.55));
     }
   }
 
   void _paintParticles(Canvas canvas) {
     for (final particle in particles) {
       final t = (particle.age / particle.duration).clamp(0.0, 1.0);
-      canvas.drawCircle(particle.position, lerpDouble(4.2, 1.0, t) ?? 2, Paint()..color = particle.color.withOpacity(1.0 - t)..maskFilter = const MaskFilter.blur(BlurStyle.outer, 5));
+      final opacity = 1.0 - t;
+      final size = lerpDouble(particle.size, 1.0, t) ?? 1.0;
+      canvas.drawRect(Rect.fromCenter(center: particle.position, width: size, height: size), Paint()..color = particle.color.withOpacity(opacity)..isAntiAlias = false);
+      if (opacity > 0.35) {
+        canvas.drawRect(Rect.fromCenter(center: particle.position, width: size + 2, height: size + 2), Paint()..color = particle.color.withOpacity(opacity * 0.18)..isAntiAlias = false);
+      }
     }
   }
 
@@ -545,16 +622,89 @@ class TapOrbitPainter extends CustomPainter {
     final centerX = size.width / 2;
     for (int i = 0; i < 3; i++) {
       final active = i < lives;
-      final position = Offset(centerX + (i - 1) * 26, bottom);
-      canvas.drawCircle(position, 8, Paint()..color = Colors.white.withOpacity(active ? 0.42 : 0.08)..maskFilter = const MaskFilter.blur(BlurStyle.outer, 10));
-      canvas.drawCircle(position, 4.8, Paint()..color = Colors.white.withOpacity(active ? 1.0 : 0.18));
+      final position = Offset(centerX + (i - 1) * 28, bottom);
+      canvas.drawCircle(position, 8, Paint()..color = Colors.white.withOpacity(active ? 0.34 : 0.07)..maskFilter = const MaskFilter.blur(BlurStyle.outer, 8));
+      canvas.drawRect(Rect.fromCenter(center: position, width: 8, height: 8), Paint()..color = Colors.white.withOpacity(active ? 0.95 : 0.18)..isAntiAlias = false);
     }
+  }
+
+  void _drawPixelArc(Canvas canvas, {required Offset center, required double radius, required double start, required double sweep, required Color color, required double pixel}) {
+    final steps = max(12, (radius * sweep / pixel).round());
+    for (int i = 0; i <= steps; i++) {
+      final angle = start + sweep * (i / steps);
+      final point = Offset(center.dx + cos(angle) * radius, center.dy + sin(angle) * radius);
+      canvas.drawRect(Rect.fromCenter(center: point, width: pixel, height: pixel), Paint()..color = color.withOpacity(0.95)..isAntiAlias = false);
+    }
+  }
+
+  void _drawPixelRing(Canvas canvas, {required Offset center, required double radius, required Color color, required double pixel}) {
+    final steps = max(24, (radius * 0.7).round());
+    for (int i = 0; i < steps; i++) {
+      final angle = (pi * 2 / steps) * i;
+      final point = Offset(center.dx + cos(angle) * radius, center.dy + sin(angle) * radius);
+      canvas.drawRect(Rect.fromCenter(center: point, width: pixel, height: pixel), Paint()..color = color..isAntiAlias = false);
+    }
+  }
+
+  void _drawPixelPlanet(Canvas canvas, {required Offset center, required double radius, required Color base, required Color shadow, required Color light, required double pixel}) {
+    final half = radius.ceilToDouble();
+    for (double y = -half; y <= half; y += pixel) {
+      for (double x = -half; x <= half; x += pixel) {
+        final nx = x / radius;
+        final ny = y / radius;
+        final d2 = nx * nx + ny * ny;
+        if (d2 > 1) continue;
+        final edge = d2 > 0.78;
+        final lightValue = (-nx * 0.72) + (-ny * 0.95);
+        Color c = base;
+        if (edge) {
+          c = shadow;
+        } else if (lightValue > 0.72) {
+          c = light;
+        } else if (lightValue < -0.15) {
+          c = Color.lerp(base, shadow, 0.45)!;
+        }
+        if (d2 < 0.42 && ((x / pixel).round() + (y / pixel).round()) % 5 == 0) c = Color.lerp(c, light, 0.15)!;
+        canvas.drawRect(Rect.fromLTWH(center.dx + x, center.dy + y, pixel, pixel), Paint()..color = c..isAntiAlias = false);
+      }
+    }
+  }
+
+  Color _darken(Color color, double amount) {
+    final hsl = HSLColor.fromColor(color);
+    return hsl.withLightness((hsl.lightness - amount).clamp(0.0, 1.0)).toColor();
+  }
+
+  Color _lighten(Color color, double amount) {
+    final hsl = HSLColor.fromColor(color);
+    return hsl.withLightness((hsl.lightness + amount).clamp(0.0, 1.0)).toColor();
   }
 
   double _orbitRadiusFor(int index, Size size) => min(size.width, size.height) * 0.22 + min(size.width, size.height) * 0.105 * index;
 
   @override
   bool shouldRepaint(covariant TapOrbitPainter oldDelegate) => true;
+}
+
+class _PixelPanel extends StatelessWidget {
+  const _PixelPanel({required this.child, required this.borderColor, this.padding = const EdgeInsets.symmetric(horizontal: 12, vertical: 10)});
+
+  final Widget child;
+  final Color borderColor;
+  final EdgeInsets padding;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: padding,
+      decoration: BoxDecoration(
+        color: const Color(0xCC05070D),
+        border: Border.all(color: borderColor.withOpacity(0.8), width: 2),
+        boxShadow: [BoxShadow(color: borderColor.withOpacity(0.14), blurRadius: 14, spreadRadius: 1)],
+      ),
+      child: child,
+    );
+  }
 }
 
 class OrbitPlanet {
@@ -575,10 +725,33 @@ class TapRipple {
 }
 
 class HitParticle {
-  HitParticle({required this.position, required this.velocity, required this.color, required this.duration});
+  HitParticle({required this.position, required this.velocity, required this.color, required this.duration, required this.size});
   Offset position;
   final Offset velocity;
   final Color color;
   final double duration;
+  final double size;
   double age = 0;
+}
+
+class BackgroundStar {
+  BackgroundStar({required this.position, required this.size, required this.baseOpacity, required this.phase, required this.twinkleSpeed, required this.cross});
+  final Offset position;
+  final double size;
+  final double baseOpacity;
+  double phase;
+  final double twinkleSpeed;
+  final bool cross;
+}
+
+class BackgroundPlanet {
+  BackgroundPlanet({required this.center, required this.radius, required this.base, required this.shadow, required this.light, required this.pixelSize, required this.ring, this.ringColor});
+  final Offset center;
+  final double radius;
+  final Color base;
+  final Color shadow;
+  final Color light;
+  final double pixelSize;
+  final bool ring;
+  final Color? ringColor;
 }
