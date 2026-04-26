@@ -26,6 +26,8 @@ class _GameScreenState extends State<GameScreen>
   static const int hitsPerAdditionalOrbit = 5;
   static const double firstOrbitWarmupLead = 1.55;
   static const double firstOrbitWarmupBoost = 1.28;
+  static const int randomOrbitThreshold = 150;
+  static const int roamingGateThreshold = 250;
 
   late final Ticker _ticker;
   final Random _random = Random(42);
@@ -58,6 +60,7 @@ class _GameScreenState extends State<GameScreen>
   double _hintOpacity = 1;
   double _feedbackAge = 1;
   double _cometCooldown = 4;
+  double _currentGateAngle = gateAngle;
   String _feedbackText = '';
   Color _feedbackColor = Colors.white;
   bool _gameEnded = false;
@@ -137,6 +140,7 @@ class _GameScreenState extends State<GameScreen>
     _comboPulse = 0;
     _gatePulse = 0;
     _clock = 0;
+    _currentGateAngle = gateAngle;
     _hintOpacity = 1;
     _feedbackAge = 1;
     _feedbackText = '';
@@ -316,7 +320,7 @@ class _GameScreenState extends State<GameScreen>
 
   double _initialAngleForPlanet(int index) {
     if (index == 0) {
-      return gateAngle + (pi * 2) - firstOrbitWarmupLead;
+      return _currentGateAngle + (pi * 2) - firstOrbitWarmupLead;
     }
     return pi / 2 + index * 0.75;
   }
@@ -335,6 +339,60 @@ class _GameScreenState extends State<GameScreen>
     final timeProgress = (_clock / 12.0).clamp(0.0, 1.0);
     final progress = max(hitProgress, timeProgress);
     return lerpDouble(firstOrbitWarmupBoost, 1.0, progress) ?? 1.0;
+  }
+
+  double _frenzyLevel() => (_score / 320).clamp(0, 1).toDouble();
+
+  double _nextCometCooldown() {
+    final frenzy = _frenzyLevel();
+    final minCooldown = lerpDouble(2.2, 0.48, frenzy) ?? 1.0;
+    final maxCooldown = lerpDouble(4.2, 1.15, frenzy) ?? 2.0;
+    return minCooldown +
+        _random.nextDouble() * max(0.15, maxCooldown - minCooldown);
+  }
+
+  int _cometsPerBurst() {
+    if (_score >= 320) return 4;
+    if (_score >= 220) return 3;
+    if (_score >= 120) return 2;
+    return 1;
+  }
+
+  int _maxTrailPoints() => 8 + (_frenzyLevel() * 7).round();
+
+  int _nextTargetIndex() {
+    if (_planets.isEmpty) return 0;
+    if (_score < randomOrbitThreshold || _planets.length <= 1) {
+      return (_targetIndex + 1) % _planets.length;
+    }
+
+    final candidates = List.generate(_planets.length, (i) => i)
+      ..remove(_targetIndex);
+    if (candidates.isEmpty) return _targetIndex;
+    return candidates[_random.nextInt(candidates.length)];
+  }
+
+  double _nextGateAngle() {
+    if (_score < roamingGateThreshold) return gateAngle;
+
+    const candidateAngles = <double>[
+      -pi / 4,
+      0,
+      pi / 3,
+      pi / 2,
+      3 * pi / 4,
+      pi,
+      -3 * pi / 4,
+      -2.2,
+    ];
+
+    var next = candidateAngles[_random.nextInt(candidateAngles.length)];
+    if (candidateAngles.length == 1) return next;
+
+    while (_angleDistance(next, _currentGateAngle) < 0.45) {
+      next = candidateAngles[_random.nextInt(candidateAngles.length)];
+    }
+    return next;
   }
 
   void _tick(Duration elapsed) {
@@ -392,8 +450,10 @@ class _GameScreenState extends State<GameScreen>
 
     _cometCooldown -= dt;
     if (_cometCooldown <= 0 && _screenSize != Size.zero) {
-      _spawnComet();
-      _cometCooldown = 2.2 + _random.nextDouble() * 4.2;
+      for (int i = 0; i < _cometsPerBurst(); i++) {
+        _spawnComet();
+      }
+      _cometCooldown = _nextCometCooldown();
     }
 
     final dead = <CometTrail>[];
@@ -435,15 +495,16 @@ class _GameScreenState extends State<GameScreen>
     final rawDirection = end - start;
     final distance = rawDirection.distance == 0 ? 1.0 : rawDirection.distance;
     final direction = rawDirection / distance;
-    final speed = 420 + _random.nextDouble() * 240;
+    final frenzy = _frenzyLevel();
+    final speed = 420 + _random.nextDouble() * 240 + frenzy * 220;
 
     _comets.add(
       CometTrail(
         position: start,
         velocity: direction * speed,
-        duration: 0.9 + _random.nextDouble() * 0.35,
-        size: 3.0 + _random.nextDouble() * 1.8,
-        tailLength: 12 + _random.nextInt(9),
+        duration: 0.9 + _random.nextDouble() * 0.35 - frenzy * 0.18,
+        size: 3.0 + _random.nextDouble() * 1.8 + frenzy * 0.8,
+        tailLength: 12 + _random.nextInt(9) + (frenzy * 8).round(),
         color: _random.nextDouble() > 0.45
             ? Colors.white
             : const Color(0xFF9EEBFF),
@@ -467,7 +528,7 @@ class _GameScreenState extends State<GameScreen>
           center.dy + sin(planet.angle) * radius,
         );
         planet.trail.add(position);
-        if (planet.trail.length > 8) planet.trail.removeAt(0);
+        if (planet.trail.length > _maxTrailPoints()) planet.trail.removeAt(0);
       }
     }
   }
@@ -496,12 +557,12 @@ class _GameScreenState extends State<GameScreen>
     AudioService.playTap();
 
     final target = _planets[_targetIndex.clamp(0, _planets.length - 1)];
-    final distance = _angleDistance(target.angle, gateAngle);
+    final distance = _angleDistance(target.angle, _currentGateAngle);
     final center = _screenSize.center(Offset.zero);
     final radius = _orbitRadiusFor(target.index, _screenSize);
     final gatePosition = Offset(
-      center.dx + cos(gateAngle) * radius,
-      center.dy + sin(gateAngle) * radius,
+      center.dx + cos(_currentGateAngle) * radius,
+      center.dy + sin(_currentGateAngle) * radius,
     );
 
     _ripples.add(TapRipple(color: target.color, radius: radius));
@@ -510,8 +571,8 @@ class _GameScreenState extends State<GameScreen>
     if (distance <= hitWindow) {
       _handleHit(target, distance <= perfectWindow, gatePosition);
     } else {
-      final signed = _signedAngleDifference(target.angle, gateAngle);
-      _handleMiss(signed < 0 ? 'TOO EARLY' : 'TOO LATE', target.color);
+      final signed = _signedAngleDifference(target.angle, _currentGateAngle);
+      _handleMiss(signed < 0 ? 'MISS' : 'TOO LATE', target.color);
     }
   }
 
@@ -551,8 +612,8 @@ class _GameScreenState extends State<GameScreen>
     }
     if (_totalHits >= _hitsNeededForNextOrbit()) _addPlanet();
 
-    _targetIndex++;
-    if (_targetIndex >= _planets.length) _targetIndex = 0;
+    _targetIndex = _nextTargetIndex();
+    _currentGateAngle = _nextGateAngle();
   }
 
   void _handleMiss(String message, Color color) {
@@ -679,11 +740,12 @@ class _GameScreenState extends State<GameScreen>
                     flashColor: _flashColor,
                     flashOpacity: _flashOpacity,
                     targetIndex: _targetIndex,
-                    gateAngle: gateAngle,
+                    gateAngle: _currentGateAngle,
                     hitWindow: hitWindow,
                     perfectWindow: perfectWindow,
                     gatePulse: _gatePulse,
                     time: _clock,
+                    frenzy: _frenzyLevel(),
                   ),
                 ),
                 SafeArea(
@@ -889,6 +951,7 @@ class TapOrbitPainter extends CustomPainter {
     required this.perfectWindow,
     required this.gatePulse,
     required this.time,
+    required this.frenzy,
   });
 
   final List<OrbitPlanet> planets;
@@ -907,6 +970,7 @@ class TapOrbitPainter extends CustomPainter {
   final double perfectWindow;
   final double gatePulse;
   final double time;
+  final double frenzy;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1179,8 +1243,10 @@ class TapOrbitPainter extends CustomPainter {
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeCap = StrokeCap.round
-          ..strokeWidth = 12 + gatePulse * 6
-          ..color = color.withOpacity(0.10 + eased * 0.10 + gatePulse * 0.15)
+          ..strokeWidth = 12 + gatePulse * 6 + frenzy * 2.4
+          ..color = color.withOpacity(
+            0.10 + eased * 0.10 + gatePulse * 0.15 + frenzy * 0.08,
+          )
           ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 14),
       );
 
@@ -1193,7 +1259,7 @@ class TapOrbitPainter extends CustomPainter {
           ..style = PaintingStyle.stroke
           ..strokeCap = StrokeCap.round
           ..strokeWidth = 4.5
-          ..color = color.withOpacity(0.55 + eased * 0.30),
+          ..color = color.withOpacity(0.55 + eased * 0.30 + frenzy * 0.08),
       );
 
       canvas.drawArc(
@@ -1263,30 +1329,92 @@ class TapOrbitPainter extends CustomPainter {
   }
 
   void _paintCenterStar(Canvas canvas, Offset center, Size size) {
-    final coreRadius = min(size.width, size.height) * 0.04;
+    final sunPulse = 1.0 + sin(time * (2.6 + frenzy * 2.0)) * 0.06;
+    final coreRadius =
+        min(size.width, size.height) * (0.04 + frenzy * 0.005) * sunPulse;
+    final sunStyle = PlanetStyle(
+      base: const Color(0xFFFFB347),
+      shadow: const Color(0xFFB85E00),
+      light: const Color(0xFFFFF2A0),
+      accent: const Color(0xFFFF7A47),
+      outline: const Color(0xFFFFF6CF),
+      ringColor: const Color(0xFFFFD97A),
+      moonColor: const Color(0xFFFFF2C2),
+      pattern: PlanetPattern.storm,
+    );
+
     canvas.drawCircle(
       center,
-      coreRadius * 3.6,
+      coreRadius * (3.8 + frenzy * 0.9),
       Paint()
-        ..color = Colors.white.withOpacity(0.12)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 24),
+        ..color = Colors.white.withOpacity(0.12 + frenzy * 0.05)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 26),
     );
     canvas.drawCircle(
       center,
-      coreRadius * 2.3,
+      coreRadius * (2.5 + frenzy * 0.4),
       Paint()
-        ..color = const Color(0xFFFFCB47).withOpacity(0.16)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 18),
+        ..color = sunStyle.accent.withOpacity(0.18 + frenzy * 0.09)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 22),
     );
-    _drawPixelPlanet(
+
+    _drawSolarFlares(
       canvas,
       center: center,
-      radius: coreRadius,
-      base: const Color(0xFFFFB347),
-      shadow: const Color(0xFFCC6A00),
-      light: const Color(0xFFFFF1A8),
-      pixel: 3,
+      radius: coreRadius * (1.85 + frenzy * 0.25),
+      color: sunStyle.accent,
+      outline: sunStyle.outline,
     );
+
+    _drawPlanetSprite(
+      canvas,
+      center: center,
+      radius: coreRadius * 1.08,
+      style: sunStyle,
+      pixel: 3,
+      spin: time * (0.48 + frenzy * 0.35),
+      active: true,
+    );
+
+    _drawPlanetSparkles(
+      canvas,
+      center: center,
+      radius: coreRadius * (2.0 + frenzy * 0.35),
+      spin: time * 0.95,
+      color: sunStyle.outline,
+    );
+  }
+
+  void _drawSolarFlares(
+    Canvas canvas, {
+    required Offset center,
+    required double radius,
+    required Color color,
+    required Color outline,
+  }) {
+    const spokes = 8;
+    for (int i = 0; i < spokes; i++) {
+      final angle = time * 0.55 + (pi * 2 / spokes) * i;
+      final reach = radius + sin(time * 2.0 + i) * (3 + frenzy * 2);
+      final point = center + Offset(cos(angle) * reach, sin(angle) * reach);
+      final width = 2.0 + (i.isEven ? frenzy * 0.9 : 0.0);
+      canvas.drawRect(
+        Rect.fromCenter(center: point, width: width, height: width),
+        Paint()
+          ..color = color.withOpacity(0.88)
+          ..isAntiAlias = false,
+      );
+      canvas.drawRect(
+        Rect.fromCenter(
+          center: point,
+          width: width * 2.6,
+          height: width * 0.85,
+        ),
+        Paint()
+          ..color = outline.withOpacity(0.55)
+          ..isAntiAlias = false,
+      );
+    }
   }
 
   void _paintRipples(Canvas canvas, Offset center) {
