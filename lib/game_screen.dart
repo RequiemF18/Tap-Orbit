@@ -1350,21 +1350,28 @@ class TapOrbitPainter extends CustomPainter {
         ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 22),
     );
 
+    _drawSolarCorona(
+      canvas,
+      center: center,
+      radius: coreRadius * 1.35,
+      color: sunStyle.base,
+      outline: sunStyle.outline,
+    );
     _drawSolarFlares(
       canvas,
       center: center,
-      radius: coreRadius * (1.85 + frenzy * 0.25),
+      radius: coreRadius * (1.62 + frenzy * 0.22),
       color: sunStyle.accent,
       outline: sunStyle.outline,
     );
     _drawSolarFlares(
       canvas,
       center: center,
-      radius: coreRadius * (2.2 + frenzy * 0.35),
+      radius: coreRadius * (1.98 + frenzy * 0.30),
       color: sunStyle.base,
       outline: sunStyle.accent,
-      rotationOffset: pi / 8,
-      alphaScale: 0.72,
+      rotationOffset: pi / 10,
+      alphaScale: 0.62,
     );
 
     _drawPlanetSprite(
@@ -1378,6 +1385,45 @@ class TapOrbitPainter extends CustomPainter {
     );
   }
 
+  void _drawSolarCorona(
+    Canvas canvas, {
+    required Offset center,
+    required double radius,
+    required Color color,
+    required Color outline,
+  }) {
+    const spikes = 18;
+    for (int i = 0; i < spikes; i++) {
+      final angle = time * 0.18 + (pi * 2 / spikes) * i;
+      final pulse = sin(time * 2.4 + i * 0.55) * 0.5 + 0.5;
+      final distance = radius + pulse * (2.4 + frenzy * 2.2);
+      final point =
+          center + Offset(cos(angle) * distance, sin(angle) * distance);
+      final size = 2.0 + pulse * 1.2 + frenzy * 0.35;
+
+      canvas.drawRect(
+        Rect.fromCenter(center: point, width: size, height: size),
+        Paint()
+          ..color = outline.withOpacity(0.72)
+          ..isAntiAlias = false,
+      );
+      canvas.drawRect(
+        Rect.fromCenter(
+          center: center +
+              Offset(
+                cos(angle) * (distance - size * 0.9),
+                sin(angle) * (distance - size * 0.9),
+              ),
+          width: size * 0.9,
+          height: size * 0.9,
+        ),
+        Paint()
+          ..color = color.withOpacity(0.88)
+          ..isAntiAlias = false,
+      );
+    }
+  }
+
   void _drawSolarFlares(
     Canvas canvas, {
     required Offset center,
@@ -1387,42 +1433,42 @@ class TapOrbitPainter extends CustomPainter {
     double rotationOffset = 0,
     double alphaScale = 1,
   }) {
-    const spokes = 8;
-    for (int i = 0; i < spokes; i++) {
-      final angle = time * 0.55 + rotationOffset + (pi * 2 / spokes) * i;
-      final pulse = sin(time * 2.0 + i * 0.8) * 0.5 + 0.5;
-      final reach = radius + pulse * (5 + frenzy * 5);
-      final point = center + Offset(cos(angle) * reach, sin(angle) * reach);
-      final width = 2.0 + pulse * 1.4 + (i.isEven ? frenzy * 0.9 : 0.0);
-      final flameLength = width * (2.8 + pulse * 1.6 + frenzy * 0.8);
-      canvas.drawRect(
-        Rect.fromCenter(center: point, width: width, height: width),
-        Paint()
-          ..color = color.withOpacity((0.88 - i * 0.02) * alphaScale)
-          ..isAntiAlias = false,
-      );
-      canvas.drawRect(
-        Rect.fromCenter(
-          center: point,
-          width: flameLength,
-          height: width * 0.9,
-        ),
-        Paint()
-          ..color = outline.withOpacity((0.55 + pulse * 0.12) * alphaScale)
-          ..isAntiAlias = false,
-      );
-      canvas.drawRect(
-        Rect.fromCenter(
-          center: center +
-              Offset(cos(angle) * (reach - width * 1.1),
-                  sin(angle) * (reach - width * 1.1)),
-          width: flameLength * 0.62,
-          height: width * 0.65,
-        ),
-        Paint()
-          ..color = color.withOpacity((0.62 + pulse * 0.10) * alphaScale)
-          ..isAntiAlias = false,
-      );
+    const tongues = 10;
+    for (int i = 0; i < tongues; i++) {
+      final angle = time * 0.42 + rotationOffset + (pi * 2 / tongues) * i;
+      final pulse = sin(time * 2.15 + i * 0.9) * 0.5 + 0.5;
+      final direction = Offset(cos(angle), sin(angle));
+      final tangent = Offset(-direction.dy, direction.dx);
+      final length = 5.5 + pulse * 6.0 + frenzy * 5.0;
+      final segments = 4 + (pulse * 3).round() + (frenzy * 2).round();
+
+      for (int segment = 0; segment < segments; segment++) {
+        final t = segments == 1 ? 1.0 : segment / (segments - 1);
+        final distance = radius + t * length;
+        final sway = sin(time * 3.2 + i * 0.7 + segment * 0.8) *
+            (1.6 + frenzy * 1.8) *
+            (1 - t);
+        final point = center + direction * distance + tangent * sway;
+        final size = lerpDouble(4.2 + frenzy, 1.2, t) ?? 2.0;
+        final offsetPoint = point + tangent * (segment.isEven ? 0.0 : 0.9);
+
+        canvas.drawRect(
+          Rect.fromCenter(center: offsetPoint, width: size, height: size),
+          Paint()
+            ..color = outline.withOpacity((0.58 + pulse * 0.16) * alphaScale)
+            ..isAntiAlias = false,
+        );
+        canvas.drawRect(
+          Rect.fromCenter(
+            center: point - direction * (size * 0.18),
+            width: size * 0.72,
+            height: size * 0.72,
+          ),
+          Paint()
+            ..color = color.withOpacity((0.82 - t * 0.18) * alphaScale)
+            ..isAntiAlias = false,
+        );
+      }
     }
   }
 
