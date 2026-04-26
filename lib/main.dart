@@ -25,8 +25,34 @@ void main() async {
   runApp(const TapOrbitApp());
 }
 
-class TapOrbitApp extends StatelessWidget {
+class TapOrbitApp extends StatefulWidget {
   const TapOrbitApp({super.key});
+
+  @override
+  State<TapOrbitApp> createState() => _TapOrbitAppState();
+}
+
+class _TapOrbitAppState extends State<TapOrbitApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      AudioService.pauseMusic();
+    } else if (state == AppLifecycleState.resumed) {
+      AudioService.resumeMusic();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {

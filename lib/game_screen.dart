@@ -1154,6 +1154,7 @@ class TapOrbitPainter extends CustomPainter {
           ..color = color.withOpacity(0.10 + eased * 0.10 + gatePulse * 0.15)
           ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 14),
       );
+
       canvas.drawArc(
         rect,
         gateAngle - hitWindow,
@@ -1165,6 +1166,7 @@ class TapOrbitPainter extends CustomPainter {
           ..strokeWidth = 4.5
           ..color = color.withOpacity(0.55 + eased * 0.30),
       );
+
       canvas.drawArc(
         rect,
         gateAngle - perfectWindow,
@@ -1180,9 +1182,7 @@ class TapOrbitPainter extends CustomPainter {
       _drawBoundaryTick(canvas, center, radius, gateAngle - hitWindow, color);
       _drawBoundaryTick(canvas, center, radius, gateAngle + hitWindow, color);
 
-      if (markerFade > 0.05) {
-        _drawPerfectPip(canvas, center, radius, color, markerFade);
-      }
+      if (markerFade > 0.05) _drawPerfectPip(canvas, center, radius, color, markerFade);
     }
   }
 
@@ -1222,7 +1222,7 @@ class TapOrbitPainter extends CustomPainter {
       center.dx + cos(gateAngle) * (radius + 14),
       center.dy + sin(gateAngle) * (radius + 14),
     );
-    const size = 2.5;
+    final size = 2.5;
     final path = Path()
       ..moveTo(pipCenter.dx, pipCenter.dy - size)
       ..lineTo(pipCenter.dx + size, pipCenter.dy)
