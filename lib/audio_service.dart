@@ -8,16 +8,13 @@ class AudioService {
   static const String _enabledKey = 'tap_orbit_audio_enabled';
 
   static bool _enabled = true;
-
   static bool get enabled => _enabled;
 
   static Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
     _enabled = prefs.getBool(_enabledKey) ?? true;
     await _safeInvoke('setEnabled', {'enabled': _enabled});
-    if (_enabled) {
-      await startMusic();
-    }
+    if (_enabled) await startMusic();
   }
 
   static Future<void> toggle() async {
@@ -38,9 +35,7 @@ class AudioService {
     await _safeInvoke('startMusic');
   }
 
-  static Future<void> stopMusic() async {
-    await _safeInvoke('stopMusic');
-  }
+  static Future<void> stopMusic() async => _safeInvoke('stopMusic');
 
   static Future<void> playTap() async => _play('tap');
   static Future<void> playHit() async => _play('hit');
@@ -51,14 +46,16 @@ class AudioService {
 
   static Future<void> _play(String sound) async {
     if (!_enabled) return;
-    await _safeInvoke('play', {'sound': sound});
+    try {
+      await _channel.invokeMethod('play', {'sound': sound});
+    } catch (_) {
+      await SystemSound.play(SystemSoundType.click);
+    }
   }
 
   static Future<void> _safeInvoke(String method, [Map<String, Object?>? args]) async {
     try {
       await _channel.invokeMethod(method, args);
-    } catch (_) {
-      // Audio is optional. Keep gameplay running even if native audio is unavailable.
-    }
+    } catch (_) {}
   }
 }

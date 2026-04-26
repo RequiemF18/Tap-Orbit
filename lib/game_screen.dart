@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'audio_service.dart';
 import 'game_over.dart';
 
 class GameScreen extends StatefulWidget {
@@ -185,7 +186,7 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
       ),
     ]);
 
-    _cometCooldown = 4 + _random.nextDouble() * 5;
+    _cometCooldown = 1.8 + _random.nextDouble() * 3.2;
   }
 
   List<PlanetMote> _createPlanetMotes(int count) {
@@ -270,7 +271,7 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     _cometCooldown -= dt;
     if (_cometCooldown <= 0 && _screenSize != Size.zero) {
       _spawnComet();
-      _cometCooldown = 6 + _random.nextDouble() * 8;
+      _cometCooldown = 2.2 + _random.nextDouble() * 4.2;
     }
 
     final dead = <CometTrail>[];
@@ -283,19 +284,45 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
   }
 
   void _spawnComet() {
-    final startX = _screenSize.width * (0.15 + _random.nextDouble() * 0.7);
-    final startY = _screenSize.height * (0.05 + _random.nextDouble() * 0.22);
-    final angle = 2.35 + _random.nextDouble() * 0.28;
-    final speed = 360 + _random.nextDouble() * 180;
+    final w = _screenSize.width;
+    final h = _screenSize.height;
+    final side = _random.nextInt(4);
+
+    late Offset start;
+    late Offset end;
+
+    switch (side) {
+      case 0:
+        start = Offset(-24, _random.nextDouble() * h);
+        end = Offset(w + 80, _random.nextDouble() * h);
+        break;
+      case 1:
+        start = Offset(w + 24, _random.nextDouble() * h);
+        end = Offset(-80, _random.nextDouble() * h);
+        break;
+      case 2:
+        start = Offset(_random.nextDouble() * w, -24);
+        end = Offset(_random.nextDouble() * w, h + 80);
+        break;
+      default:
+        start = Offset(_random.nextDouble() * w, h + 24);
+        end = Offset(_random.nextDouble() * w, -80);
+        break;
+    }
+
+    final rawDirection = end - start;
+    final distance = rawDirection.distance == 0 ? 1.0 : rawDirection.distance;
+    final direction = rawDirection / distance;
+    final speed = 420 + _random.nextDouble() * 240;
 
     _comets.add(
       CometTrail(
-        position: Offset(startX, startY),
-        velocity: Offset(cos(angle), sin(angle)) * speed,
-        duration: 0.75 + _random.nextDouble() * 0.25,
-        size: 3.0 + _random.nextDouble() * 1.5,
-        tailLength: 9 + _random.nextInt(6),
-        color: _random.nextDouble() > 0.5 ? Colors.white : const Color(0xFF9EEBFF),
+        position: start,
+        velocity: direction * speed,
+        duration: 0.9 + _random.nextDouble() * 0.35,
+        size: 3.0 + _random.nextDouble() * 1.8,
+        tailLength: 12 + _random.nextInt(9),
+        color: _random.nextDouble() > 0.45 ? Colors.white : const Color(0xFF9EEBFF),
       ),
     );
   }
@@ -337,6 +364,7 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
 
   void _onTap() {
     if (_gameEnded || _screenSize == Size.zero || _planets.isEmpty) return;
+    AudioService.playTap();
 
     final target = _planets[_targetIndex.clamp(0, _planets.length - 1)];
     final distance = _angleDistance(target.angle, gateAngle);
@@ -365,6 +393,15 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     final comboBonus = _hitStreak >= 3 ? 2 : 1;
     _score += perfect ? comboBonus + 1 : comboBonus;
 
+    if (perfect) {
+      AudioService.playPerfect();
+    } else {
+      AudioService.playHit();
+    }
+    if (_hitStreak == 3 || _hitStreak % 5 == 0) {
+      AudioService.playCombo();
+    }
+
     _flashColor = Colors.white;
     _flashOpacity = perfect ? 0.38 : 0.26;
     _feedbackText = perfect ? 'PERFECT' : 'NICE';
@@ -385,6 +422,7 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
   }
 
   void _handleMiss(String message, Color color) {
+    AudioService.playMiss();
     _hitStreak = 0;
     _lives--;
     _flashColor = Colors.red;
@@ -400,6 +438,7 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
 
   Future<void> _endGame() async {
     if (_gameEnded) return;
+    AudioService.playGameOver();
     _gameEnded = true;
     _ticker.stop();
 
