@@ -931,7 +931,8 @@ class TapOrbitPainter extends CustomPainter {
 
       if (!active) continue;
 
-      final rawDistance = _angleDistance(planet.angle, gateAngle);
+      var rawDistance = (planet.angle - gateAngle).abs() % (pi * 2);
+      if (rawDistance > pi) rawDistance = pi * 2 - rawDistance;
       final approach = (1.0 - (rawDistance / 0.9)).clamp(0.0, 1.0);
       final eased = approach * approach * (3 - 2 * approach);
 
