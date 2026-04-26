@@ -22,6 +22,10 @@ class _GameScreenState extends State<GameScreen>
   static const double gateAngle = -pi / 2;
   static const double hitWindow = 0.34;
   static const double perfectWindow = 0.12;
+  static const int warmupHitsToSecondOrbit = 3;
+  static const int hitsPerAdditionalOrbit = 5;
+  static const double firstOrbitWarmupLead = 1.55;
+  static const double firstOrbitWarmupBoost = 1.28;
 
   late final Ticker _ticker;
   final Random _random = Random(42);
@@ -303,11 +307,34 @@ class _GameScreenState extends State<GameScreen>
       OrbitPlanet(
         color: _planetStyles[index].base,
         style: _planetStyles[index],
-        angle: pi / 2 + index * 0.75,
+        angle: _initialAngleForPlanet(index),
         speed: direction * (0.95 + index * 0.18),
         index: index,
       ),
     );
+  }
+
+  double _initialAngleForPlanet(int index) {
+    if (index == 0) {
+      return gateAngle + (pi * 2) - firstOrbitWarmupLead;
+    }
+    return pi / 2 + index * 0.75;
+  }
+
+  int _hitsNeededForNextOrbit() {
+    if (_planets.length >= maxPlanets) return 1 << 30;
+    if (_planets.length <= 1) return warmupHitsToSecondOrbit;
+    return warmupHitsToSecondOrbit +
+        (_planets.length - 1) * hitsPerAdditionalOrbit;
+  }
+
+  double _orbitSpeedMultiplierFor(OrbitPlanet planet) {
+    if (planet.index != 0 || _planets.length != 1) return 1.0;
+
+    final hitProgress = (_totalHits / warmupHitsToSecondOrbit).clamp(0.0, 1.0);
+    final timeProgress = (_clock / 12.0).clamp(0.0, 1.0);
+    final progress = max(hitProgress, timeProgress);
+    return lerpDouble(firstOrbitWarmupBoost, 1.0, progress) ?? 1.0;
   }
 
   void _tick(Duration elapsed) {
@@ -426,9 +453,11 @@ class _GameScreenState extends State<GameScreen>
 
   void _updatePlanets(double dt) {
     for (final planet in _planets) {
-      planet.angle += planet.speed * dt;
+      final speedMultiplier = _orbitSpeedMultiplierFor(planet);
+      planet.angle += planet.speed * speedMultiplier * dt;
       planet.spin += dt *
           (planet.speed.isNegative ? -0.9 : 0.9) *
+          speedMultiplier *
           (0.85 + planet.index * 0.14);
       if (_screenSize != Size.zero) {
         final center = _screenSize.center(Offset.zero);
@@ -520,7 +549,7 @@ class _GameScreenState extends State<GameScreen>
         p.speed *= 1.10;
       }
     }
-    if (_totalHits % 5 == 0 && _planets.length < maxPlanets) _addPlanet();
+    if (_totalHits >= _hitsNeededForNextOrbit()) _addPlanet();
 
     _targetIndex++;
     if (_targetIndex >= _planets.length) _targetIndex = 0;
@@ -1182,7 +1211,8 @@ class TapOrbitPainter extends CustomPainter {
       _drawBoundaryTick(canvas, center, radius, gateAngle - hitWindow, color);
       _drawBoundaryTick(canvas, center, radius, gateAngle + hitWindow, color);
 
-      if (markerFade > 0.05) _drawPerfectPip(canvas, center, radius, color, markerFade);
+      if (markerFade > 0.05)
+        _drawPerfectPip(canvas, center, radius, color, markerFade);
     }
   }
 
