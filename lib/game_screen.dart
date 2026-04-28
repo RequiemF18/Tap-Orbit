@@ -27,7 +27,29 @@ class _GameScreenState extends State<GameScreen>
   static const double firstOrbitWarmupLead = 1.55;
   static const double firstOrbitWarmupBoost = 1.28;
   static const int randomOrbitThreshold = 150;
-  static const int roamingGateThreshold = 250;
+
+  // Milestones (score thresholds)
+  static const int milestoneDriftScore = 25;
+  static const int milestoneFluxScore = 75;
+  static const int milestoneStormScore = 150;
+  static const int milestoneSingularityScore = 300;
+
+  // Speed system (per plan)
+  static const double speedScalePerHit = 0.008;
+  static const double speedScalePerMilestone = 0.06;
+  static const double speedScaleCap = 2.35;
+  static const double planetMaxSpeedBase = 2.25;
+  static const double planetMaxSpeedStep = 0.15;
+
+  // Golden target
+  static const int goldenScoreThreshold = 100;
+  static const double goldenChanceBase = 0.06;
+  static const double goldenChanceSingularity = 0.10;
+  static const double goldenHitWindowMult = 0.72;
+  static const double goldenPerfectWindowMult = 0.70;
+
+  // Last life
+  static const int resurrectionStreak = 8;
 
   late final Ticker _ticker;
   final Random _random = Random(42);
@@ -64,6 +86,26 @@ class _GameScreenState extends State<GameScreen>
   String _feedbackText = '';
   Color _feedbackColor = Colors.white;
   bool _gameEnded = false;
+
+  // Milestone progression
+  int _milestoneTier = 0; // 0=ORBIT, 1=DRIFT, 2=FLUX, 3=STORM, 4=SINGULARITY
+  String _milestoneName = 'ORBIT';
+  String _milestoneAnnouncement = '';
+  String _milestoneSubtitle = '';
+  double _milestoneAge = 999;
+
+  // Last life mechanics
+  int _lastLifeStreak = 0;
+  String _resurrectionAnnouncement = '';
+  double _resurrectionAge = 999;
+
+  // Combo shatter
+  double _shatterAge = 999;
+
+  // Gate rotation (STORM / SINGULARITY)
+  double _gateRotationSpeed = 0;
+  int _gateDirection = 1;
+  double _gateDirectionFlipCooldown = 0;
 
   final List<PlanetStyle> _planetStyles = const [
     PlanetStyle(
@@ -146,6 +188,18 @@ class _GameScreenState extends State<GameScreen>
     _feedbackText = '';
     _feedbackColor = Colors.white;
     _gameEnded = false;
+    _milestoneTier = 0;
+    _milestoneName = 'ORBIT';
+    _milestoneAnnouncement = '';
+    _milestoneSubtitle = '';
+    _milestoneAge = 999;
+    _lastLifeStreak = 0;
+    _resurrectionAnnouncement = '';
+    _resurrectionAge = 999;
+    _shatterAge = 999;
+    _gateRotationSpeed = 0;
+    _gateDirection = 1;
+    _gateDirectionFlipCooldown = 0;
     _addPlanet();
   }
 
@@ -307,13 +361,16 @@ class _GameScreenState extends State<GameScreen>
     if (_planets.length >= maxPlanets) return;
     final index = _planets.length;
     final direction = index.isEven ? 1.0 : -1.0;
+    final baseSpeed = 0.72 + index * 0.12; // per arcade balance plan
+    final maxSpeed = planetMaxSpeedBase + index * planetMaxSpeedStep;
     _planets.add(
       OrbitPlanet(
         color: _planetStyles[index].base,
         style: _planetStyles[index],
         angle: _initialAngleForPlanet(index),
-        speed: direction * (0.95 + index * 0.18),
+        speed: direction * baseSpeed,
         index: index,
+        maxSpeed: maxSpeed,
       ),
     );
   }
@@ -333,15 +390,191 @@ class _GameScreenState extends State<GameScreen>
   }
 
   double _orbitSpeedMultiplierFor(OrbitPlanet planet) {
-    if (planet.index != 0 || _planets.length != 1) return 1.0;
+    final globalScale = _speedScaleGlobal();
 
-    final hitProgress = (_totalHits / warmupHitsToSecondOrbit).clamp(0.0, 1.0);
-    final timeProgress = (_clock / 12.0).clamp(0.0, 1.0);
-    final progress = max(hitProgress, timeProgress);
-    return lerpDouble(firstOrbitWarmupBoost, 1.0, progress) ?? 1.0;
+    // Warmup boost only on the very first planet during onboarding
+    if (planet.index == 0 && _planets.length == 1) {
+      final hitProgress = (_totalHits / warmupHitsToSecondOrbit).clamp(0.0, 1.0);
+      final timeProgress = (_clock / 12.0).clamp(0.0, 1.0);
+      final progress = max(hitProgress, timeProgress);
+      final warmup = lerpDouble(firstOrbitWarmupBoost, 1.0, progress) ?? 1.0;
+      return warmup * globalScale;
+    }
+    return globalScale;
   }
 
   double _frenzyLevel() => (_score / 320).clamp(0, 1).toDouble();
+
+  // ---------------- Arcade balance plan helpers ----------------
+
+  int _comboTier() {
+    if (_hitStreak >= 21) return 4;
+    if (_hitStreak >= 13) return 3;
+    if (_hitStreak >= 7) return 2;
+    if (_hitStreak >= 3) return 1;
+    return 0;
+  }
+
+  int _comboMultiplier() {
+    switch (_comboTier()) {
+      case 4:
+        return 5;
+      case 3:
+        return 4;
+      case 2:
+        return 3;
+      case 1:
+        return 2;
+      default:
+        return 1;
+    }
+  }
+
+  String _comboTierName() {
+    switch (_comboTier()) {
+      case 4:
+        return 'MAX ORBIT';
+      case 3:
+        return 'HYPER';
+      case 2:
+        return 'OVERDRIVE';
+      case 1:
+        return 'CHARGED';
+      default:
+        return 'STABLE';
+    }
+  }
+
+  Color _comboTierColor(Color planetColor) {
+    switch (_comboTier()) {
+      case 4:
+        return const Color(0xFFFFD24D); // gold
+      case 3:
+        return const Color(0xFFFF66E0); // hyper magenta
+      case 2:
+        return const Color(0xFFFF9A2E); // overdrive orange
+      case 1:
+        return planetColor;
+      default:
+        return Colors.white70;
+    }
+  }
+
+  bool get _adrenalineActive => _comboTier() >= 3;
+  bool get _isLastLife => _lives == 1 && !_gameEnded;
+
+  int _computeMilestoneTier() {
+    if (_score >= milestoneSingularityScore) return 4;
+    if (_score >= milestoneStormScore) return 3;
+    if (_score >= milestoneFluxScore) return 2;
+    if (_score >= milestoneDriftScore) return 1;
+    return 0;
+  }
+
+  String _milestoneNameForTier(int tier) {
+    switch (tier) {
+      case 4:
+        return 'SINGULARITY';
+      case 3:
+        return 'STORM';
+      case 2:
+        return 'FLUX';
+      case 1:
+        return 'DRIFT';
+      default:
+        return 'ORBIT';
+    }
+  }
+
+  String _milestoneSubtitleForTier(int tier) {
+    switch (tier) {
+      case 4:
+        return 'GATE GOES WILD';
+      case 3:
+        return 'GATE IS ROTATING';
+      case 2:
+        return 'GATE GOES DIAGONAL';
+      case 1:
+        return 'GATE IS SHIFTING';
+      default:
+        return '';
+    }
+  }
+
+  double _speedScaleGlobal() {
+    final raw =
+        1.0 + _totalHits * speedScalePerHit + _milestoneTier * speedScalePerMilestone;
+    return min(speedScaleCap, raw);
+  }
+
+  double _goldenChance() {
+    if (_score < goldenScoreThreshold) return 0;
+    return _milestoneTier >= 4 ? goldenChanceSingularity : goldenChanceBase;
+  }
+
+  double _currentHitWindow() {
+    if (_planets.isEmpty) return hitWindow;
+    final target = _planets[_targetIndex.clamp(0, _planets.length - 1)];
+    return target.isGolden ? hitWindow * goldenHitWindowMult : hitWindow;
+  }
+
+  double _currentPerfectWindow() {
+    if (_planets.isEmpty) return perfectWindow;
+    final target = _planets[_targetIndex.clamp(0, _planets.length - 1)];
+    return target.isGolden
+        ? perfectWindow * goldenPerfectWindowMult
+        : perfectWindow;
+  }
+
+  void _maybeMakeTargetGolden() {
+    if (_planets.isEmpty) return;
+    final chance = _goldenChance();
+    if (chance <= 0) return;
+    if (_random.nextDouble() >= chance) return;
+    final target = _planets[_targetIndex.clamp(0, _planets.length - 1)];
+    if (target.isGolden) return;
+    target.isGolden = true;
+    target.goldenStartAngle = target.angle;
+    target.goldenAccumulatedTravel = 0;
+  }
+
+  void _resetGolden(OrbitPlanet planet) {
+    planet.isGolden = false;
+    planet.goldenAccumulatedTravel = 0;
+  }
+
+  void _checkMilestoneCrossing() {
+    final newTier = _computeMilestoneTier();
+    if (newTier == _milestoneTier) return;
+    _milestoneTier = newTier;
+    _milestoneName = _milestoneNameForTier(newTier);
+
+    // Configure gate behavior for the new tier
+    switch (newTier) {
+      case 0:
+        _gateRotationSpeed = 0;
+        break;
+      case 1:
+      case 2:
+        _gateRotationSpeed = 0; // changes via _nextGateAngle on each hit
+        break;
+      case 3:
+        _gateRotationSpeed = 0.32; // slow rotation
+        break;
+      case 4:
+        _gateRotationSpeed = 0.55; // faster + can flip
+        break;
+    }
+
+    if (newTier > 0) {
+      _milestoneAnnouncement = 'ENTERING $_milestoneName';
+      _milestoneSubtitle = _milestoneSubtitleForTier(newTier);
+      _milestoneAge = 0;
+      _flashColor = Colors.white;
+      _flashOpacity = 0.55;
+      _gatePulse = 1.0;
+    }
+  }
 
   double _nextCometCooldown() {
     final frenzy = _frenzyLevel();
@@ -373,24 +606,44 @@ class _GameScreenState extends State<GameScreen>
   }
 
   double _nextGateAngle() {
-    if (_score < roamingGateThreshold) return gateAngle;
+    // ORBIT (tier 0) — fixed top
+    if (_milestoneTier == 0) return gateAngle;
 
-    const candidateAngles = <double>[
-      -pi / 4,
-      0,
-      pi / 3,
-      pi / 2,
-      3 * pi / 4,
-      pi,
-      -3 * pi / 4,
-      -2.2,
-    ];
+    // STORM / SINGULARITY — gate is rotating; keep current angle
+    // (rotation is updated continuously in _tick)
+    if (_milestoneTier >= 3) return _currentGateAngle;
 
-    var next = candidateAngles[_random.nextInt(candidateAngles.length)];
-    if (candidateAngles.length == 1) return next;
+    // DRIFT (tier 1) — cardinal + smooth shifts
+    // FLUX  (tier 2) — diagonals included
+    final candidates = _milestoneTier == 1
+        ? const <double>[
+            -pi / 2, // top
+            0, // right
+            pi / 2, // bottom
+            pi, // left
+            -pi / 4,
+            pi / 4,
+            -3 * pi / 4,
+            3 * pi / 4,
+          ]
+        : const <double>[
+            -pi / 4,
+            -pi / 2,
+            -3 * pi / 4,
+            pi / 4,
+            pi / 2,
+            3 * pi / 4,
+            0,
+            pi,
+            -2.2,
+            2.2,
+          ];
 
-    while (_angleDistance(next, _currentGateAngle) < 0.45) {
-      next = candidateAngles[_random.nextInt(candidateAngles.length)];
+    var next = candidates[_random.nextInt(candidates.length)];
+    int attempts = 0;
+    while (_angleDistance(next, _currentGateAngle) < 0.45 && attempts < 6) {
+      next = candidates[_random.nextInt(candidates.length)];
+      attempts++;
     }
     return next;
   }
@@ -413,6 +666,27 @@ class _GameScreenState extends State<GameScreen>
       _comboPulse = max(0, _comboPulse - dt / 0.28);
       _gatePulse = max(0, _gatePulse - dt / 0.22);
       _feedbackAge += dt;
+      _milestoneAge += dt;
+      _resurrectionAge += dt;
+      _shatterAge += dt;
+
+      // STORM / SINGULARITY: continuously rotate the gate
+      if (_milestoneTier >= 3 && _gateRotationSpeed > 0) {
+        _currentGateAngle += _gateRotationSpeed * _gateDirection * dt;
+        // Wrap to keep within sane range
+        if (_currentGateAngle > pi) _currentGateAngle -= pi * 2;
+        if (_currentGateAngle < -pi) _currentGateAngle += pi * 2;
+
+        // SINGULARITY: occasional direction flip
+        if (_milestoneTier >= 4) {
+          _gateDirectionFlipCooldown -= dt;
+          if (_gateDirectionFlipCooldown <= 0) {
+            _gateDirection *= -1;
+            _gateDirectionFlipCooldown = 4.0 + _random.nextDouble() * 4.0;
+          }
+        }
+      }
+
       if (_totalHits > 0 || _lives < maxLives) {
         _hintOpacity = max(0, _hintOpacity - dt / 1.4);
       }
@@ -515,7 +789,23 @@ class _GameScreenState extends State<GameScreen>
   void _updatePlanets(double dt) {
     for (final planet in _planets) {
       final speedMultiplier = _orbitSpeedMultiplierFor(planet);
-      planet.angle += planet.speed * speedMultiplier * dt;
+      var effectiveSpeed = planet.speed * speedMultiplier;
+      // Cap to maxSpeed (preserve sign)
+      if (effectiveSpeed.abs() > planet.maxSpeed) {
+        effectiveSpeed = planet.maxSpeed * effectiveSpeed.sign;
+      }
+
+      final delta = effectiveSpeed * dt;
+      planet.angle += delta;
+
+      // Track golden orbit revolution; revert after one full orbit
+      if (planet.isGolden) {
+        planet.goldenAccumulatedTravel += delta.abs();
+        if (planet.goldenAccumulatedTravel >= pi * 2) {
+          _resetGolden(planet);
+        }
+      }
+
       planet.spin += dt *
           (planet.speed.isNegative ? -0.9 : 0.9) *
           speedMultiplier *
@@ -568,71 +858,138 @@ class _GameScreenState extends State<GameScreen>
     _ripples.add(TapRipple(color: target.color, radius: radius));
     _gatePulse = 1.0;
 
-    if (distance <= hitWindow) {
-      _handleHit(target, distance <= perfectWindow, gatePosition);
+    final hw = _currentHitWindow();
+    final pw = _currentPerfectWindow();
+    if (distance <= hw) {
+      _handleHit(target, distance <= pw, gatePosition);
     } else {
       _handleMiss('MISS', target.color);
     }
   }
 
   void _handleHit(OrbitPlanet planet, bool perfect, Offset impact) {
+    final wasGolden = planet.isGolden;
+    final tierBefore = _comboTier();
+
     _totalHits++;
     _hitStreak++;
     _bestCombo = max(_bestCombo, _hitStreak);
-    final comboBonus = _hitStreak >= 3 ? 2 : 1;
-    _score += perfect ? comboBonus + 1 : comboBonus;
 
-    if (perfect) {
+    // ----- Scoring per arcade balance plan -----
+    // base = 1 * multiplier ; perfect = base + 1 ; golden = base * 3 ; last life = +1
+    final mult = _comboMultiplier();
+    int gain = mult;
+    if (perfect) gain += 1;
+    if (wasGolden) gain *= 3;
+    if (_isLastLife) gain += 1;
+    _score += gain;
+
+    // ----- Golden cleanup -----
+    if (wasGolden) {
+      _resetGolden(planet);
+      _feedbackText = 'GOLDEN!';
+      _feedbackColor = const Color(0xFFFFD24D);
+      _spawnBurst(
+        impact,
+        const Color(0xFFFFD24D),
+        38,
+        outwardPower: 220,
+      );
+      _flashColor = const Color(0xFFFFE48A);
+      _flashOpacity = 0.55;
+    } else {
+      _feedbackText = perfect ? 'PERFECT' : 'NICE';
+      _feedbackColor = planet.color;
+      _flashColor = Colors.white;
+      _flashOpacity = perfect ? 0.38 : 0.26;
+      _spawnBurst(
+        impact,
+        planet.color,
+        perfect ? 30 : 20,
+        outwardPower: perfect ? 190 : 145,
+      );
+    }
+    _feedbackAge = 0;
+
+    // ----- Audio -----
+    if (wasGolden) {
+      AudioService.playPerfect();
+      AudioService.playCombo();
+    } else if (perfect) {
       AudioService.playPerfect();
     } else {
       AudioService.playHit();
     }
-    if (_hitStreak == 3 || _hitStreak % 5 == 0) {
+    final tierAfter = _comboTier();
+    if (tierAfter > tierBefore) {
       AudioService.playCombo();
+      _comboPulse = 1.0;
+    } else if (perfect || wasGolden) {
+      _comboPulse = 1.0;
     }
 
-    _flashColor = Colors.white;
-    _flashOpacity = perfect ? 0.38 : 0.26;
-    _feedbackText = perfect ? 'PERFECT' : 'NICE';
-    _feedbackColor = planet.color;
-    _feedbackAge = 0;
-    if (_hitStreak == 3 || _hitStreak % 5 == 0 || perfect) _comboPulse = 1.0;
-    _spawnBurst(
-      impact,
-      planet.color,
-      perfect ? 30 : 20,
-      outwardPower: perfect ? 190 : 145,
-    );
-
-    if (_totalHits % 3 == 0) {
-      for (final p in _planets) {
-        p.speed *= 1.10;
+    // ----- Last life resurrection -----
+    if (_isLastLife) {
+      _lastLifeStreak++;
+      if (_lastLifeStreak >= resurrectionStreak && _lives < maxLives) {
+        _lives++;
+        _lastLifeStreak = 0;
+        _resurrectionAnnouncement = 'RESURRECTION';
+        _resurrectionAge = 0;
+        _flashColor = const Color(0xFFFFE48A);
+        _flashOpacity = 0.78;
+        AudioService.playCombo();
+        AudioService.playPerfect();
+        _spawnBurst(
+          impact,
+          const Color(0xFFFFD24D),
+          50,
+          outwardPower: 260,
+        );
       }
+    } else {
+      _lastLifeStreak = 0;
     }
+
+    // ----- Milestone crossing detection -----
+    _checkMilestoneCrossing();
+
+    // ----- Spawning new orbits -----
     if (_totalHits >= _hitsNeededForNextOrbit()) _addPlanet();
 
     _targetIndex = _nextTargetIndex();
     _currentGateAngle = _nextGateAngle();
+    _maybeMakeTargetGolden();
   }
 
   void _handleMiss(String message, Color color) {
     AudioService.playMiss();
+    final brokenTier = _comboTier();
+    final shatter = brokenTier >= 2; // Overdrive (x3) or higher
     _hitStreak = 0;
     _lives--;
-    _flashColor = Colors.red;
-    _flashOpacity = 0.40;
-    _feedbackText = message;
-    _feedbackColor = Colors.redAccent;
+    _flashColor = shatter ? const Color(0xFFFF3B5C) : Colors.red;
+    _flashOpacity = shatter ? 0.66 : 0.40;
+    _feedbackText = shatter ? 'COMBO SHATTER' : message;
+    _feedbackColor = shatter ? const Color(0xFFFF6680) : Colors.redAccent;
     _feedbackAge = 0;
+    if (shatter) {
+      _shatterAge = 0;
+      AudioService.playGameOver();
+    }
     if (_screenSize != Size.zero) {
       _spawnBurst(
         _screenSize.center(Offset.zero),
-        color.withOpacity(0.8),
-        12,
-        outwardPower: 105,
+        shatter ? const Color(0xFFFF6680) : color.withOpacity(0.8),
+        shatter ? 30 : 12,
+        outwardPower: shatter ? 200 : 105,
       );
     }
-    if (_lives <= 0) _endGame();
+    if (_lives <= 0) {
+      _endGame();
+    } else if (_lives == 1) {
+      _lastLifeStreak = 0;
+    }
   }
 
   Future<void> _endGame() async {
@@ -703,6 +1060,17 @@ class _GameScreenState extends State<GameScreen>
     final activeColor = _planets.isEmpty
         ? Colors.cyanAccent
         : _planets[_targetIndex.clamp(0, _planets.length - 1)].color;
+    final comboColor = _comboTierColor(activeColor);
+    final comboMult = _comboMultiplier();
+    final comboTierName = _comboTierName();
+    final milestoneVisible = _milestoneAge < 1.7;
+    final milestoneOpacity = milestoneVisible
+        ? (1.0 - (_milestoneAge / 1.7).clamp(0.0, 1.0)).clamp(0.0, 1.0)
+        : 0.0;
+    final resurrectionVisible = _resurrectionAge < 1.5;
+    final resurrectionOpacity = resurrectionVisible
+        ? (1.0 - (_resurrectionAge / 1.5).clamp(0.0, 1.0)).clamp(0.0, 1.0)
+        : 0.0;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -733,11 +1101,14 @@ class _GameScreenState extends State<GameScreen>
                     flashOpacity: _flashOpacity,
                     targetIndex: _targetIndex,
                     gateAngle: _currentGateAngle,
-                    hitWindow: hitWindow,
-                    perfectWindow: perfectWindow,
+                    hitWindow: _currentHitWindow(),
+                    perfectWindow: _currentPerfectWindow(),
                     gatePulse: _gatePulse,
                     time: _clock,
                     frenzy: _frenzyLevel(),
+                    adrenalineActive: _adrenalineActive,
+                    lastLifeActive: _isLastLife,
+                    shatterAge: _shatterAge,
                   ),
                 ),
                 SafeArea(
@@ -821,22 +1192,63 @@ class _GameScreenState extends State<GameScreen>
                           child: Transform.scale(
                             scale: comboScale,
                             child: _PixelPanel(
-                              borderColor: activeColor,
+                              borderColor: comboColor,
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 14,
                                 vertical: 8,
                               ),
-                              child: Text(
-                                'COMBO x2  $_hitStreak',
-                                style: TextStyle(
-                                  color: activeColor,
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w900,
-                                  letterSpacing: 1.8,
-                                  shadows: [
-                                    Shadow(color: activeColor, blurRadius: 16),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    'COMBO x$comboMult  $_hitStreak',
+                                    style: TextStyle(
+                                      color: comboColor,
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w900,
+                                      letterSpacing: 1.8,
+                                      shadows: [
+                                        Shadow(
+                                          color: comboColor,
+                                          blurRadius: 16,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  if (_comboTier() >= 1) ...[
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      comboTierName,
+                                      style: TextStyle(
+                                        color: comboColor.withOpacity(0.85),
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w900,
+                                        letterSpacing: 2.2,
+                                      ),
+                                    ),
                                   ],
-                                ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        AnimatedOpacity(
+                          opacity: 1,
+                          duration: const Duration(milliseconds: 200),
+                          child: _PixelPanel(
+                            borderColor: Colors.white24,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 4,
+                            ),
+                            child: Text(
+                              _milestoneName,
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 2.4,
                               ),
                             ),
                           ),
@@ -869,6 +1281,67 @@ class _GameScreenState extends State<GameScreen>
                     ),
                   ),
                 ),
+                if (milestoneOpacity > 0)
+                  IgnorePointer(
+                    child: Center(
+                      child: Opacity(
+                        opacity: milestoneOpacity,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _milestoneAnnouncement,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 38,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 4.0,
+                                shadows: [
+                                  Shadow(
+                                    color: Colors.cyanAccent,
+                                    blurRadius: 28,
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              _milestoneSubtitle,
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 3.0,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                if (resurrectionOpacity > 0)
+                  IgnorePointer(
+                    child: Center(
+                      child: Opacity(
+                        opacity: resurrectionOpacity,
+                        child: Text(
+                          _resurrectionAnnouncement,
+                          style: const TextStyle(
+                            color: Color(0xFFFFE48A),
+                            fontSize: 46,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 4.0,
+                            shadows: [
+                              Shadow(
+                                color: Color(0xFFFFD24D),
+                                blurRadius: 32,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                 SafeArea(
                   child: Align(
                     alignment: Alignment.bottomCenter,
@@ -944,6 +1417,9 @@ class TapOrbitPainter extends CustomPainter {
     required this.gatePulse,
     required this.time,
     required this.frenzy,
+    required this.adrenalineActive,
+    required this.lastLifeActive,
+    required this.shatterAge,
   });
 
   final List<OrbitPlanet> planets;
@@ -963,6 +1439,9 @@ class TapOrbitPainter extends CustomPainter {
   final double gatePulse;
   final double time;
   final double frenzy;
+  final bool adrenalineActive;
+  final bool lastLifeActive;
+  final double shatterAge;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -979,11 +1458,54 @@ class TapOrbitPainter extends CustomPainter {
     _paintPlanets(canvas, size, center);
     _paintParticles(canvas);
     _paintLives(canvas, size);
+    _paintVignettes(canvas, size);
 
     if (flashOpacity > 0) {
       canvas.drawRect(
         Offset.zero & size,
         Paint()..color = flashColor.withOpacity(flashOpacity),
+      );
+    }
+  }
+
+  void _paintVignettes(Canvas canvas, Size size) {
+    Color? vignetteColor;
+    double intensity = 0;
+
+    if (lastLifeActive) {
+      final pulse = 0.6 + 0.4 * sin(time * 4.5);
+      vignetteColor = const Color(0xFFFF1A2A);
+      intensity = 0.34 * pulse;
+    } else if (adrenalineActive && planets.isNotEmpty) {
+      final activeColor =
+          planets[targetIndex.clamp(0, planets.length - 1)].color;
+      final pulse = 0.7 + 0.3 * sin(time * 5.5);
+      vignetteColor = activeColor;
+      intensity = 0.22 * pulse;
+    }
+
+    if (vignetteColor != null && intensity > 0) {
+      final rect = Offset.zero & size;
+      final radial = RadialGradient(
+        colors: [
+          vignetteColor.withOpacity(0),
+          vignetteColor.withOpacity(intensity),
+        ],
+        stops: const [0.55, 1.0],
+      );
+      canvas.drawRect(
+        rect,
+        Paint()..shader = radial.createShader(rect),
+      );
+    }
+
+    // Combo shatter — quick red full-screen flash that fades out
+    if (shatterAge < 0.45) {
+      final t = (shatterAge / 0.45).clamp(0.0, 1.0);
+      final shatterAlpha = (1.0 - t) * 0.42;
+      canvas.drawRect(
+        Offset.zero & size,
+        Paint()..color = const Color(0xFFFF3B5C).withOpacity(shatterAlpha),
       );
     }
   }
@@ -1527,6 +2049,25 @@ class TapOrbitPainter extends CustomPainter {
         center.dy + sin(planet.angle) * orbitRadius,
       );
 
+      // Golden aura — strong glow + sparkles
+      if (planet.isGolden) {
+        final pulse = 0.55 + 0.45 * sin(time * 8.0);
+        canvas.drawCircle(
+          position,
+          32,
+          Paint()
+            ..color = const Color(0xFFFFD24D).withOpacity(0.55 * pulse)
+            ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 22),
+        );
+        canvas.drawCircle(
+          position,
+          22,
+          Paint()
+            ..color = const Color(0xFFFFE48A).withOpacity(0.60)
+            ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 12),
+        );
+      }
+
       canvas.drawCircle(
         position,
         active ? 25 : 18,
@@ -1543,13 +2084,40 @@ class TapOrbitPainter extends CustomPainter {
         active: active,
       );
 
+      // Golden overlay tint on top of the sprite
+      if (planet.isGolden) {
+        canvas.drawCircle(
+          position,
+          12,
+          Paint()
+            ..color = const Color(0xFFFFD24D).withOpacity(0.42)
+            ..blendMode = BlendMode.srcOver,
+        );
+        // Sparkle ring around it
+        for (int i = 0; i < 4; i++) {
+          final sparkAngle = time * 3.5 + i * pi / 2;
+          final sparkPos = position +
+              Offset(cos(sparkAngle), sin(sparkAngle)) * 18;
+          canvas.drawRect(
+            Rect.fromCenter(center: sparkPos, width: 3, height: 3),
+            Paint()
+              ..color = const Color(0xFFFFE48A)
+              ..isAntiAlias = false,
+          );
+        }
+      }
+
       if (active) {
         _drawPlanetReticle(
           canvas,
           center: position,
           radius: 15,
-          color: planet.style.outline,
-          accent: planet.style.accent,
+          color: planet.isGolden
+              ? const Color(0xFFFFE48A)
+              : planet.style.outline,
+          accent: planet.isGolden
+              ? const Color(0xFFFFD24D)
+              : planet.style.accent,
         );
       }
     }
@@ -2029,15 +2597,22 @@ class OrbitPlanet {
     required this.angle,
     required this.speed,
     required this.index,
+    required this.maxSpeed,
   });
 
   final Color color;
   final PlanetStyle style;
   double angle;
-  double speed;
+  double speed; // signed base speed (sign = direction). Effective speed computed in _updatePlanets.
   final int index;
+  final double maxSpeed; // absolute cap on effective speed
   double spin = 0;
   final List<Offset> trail = [];
+
+  // Golden target state
+  bool isGolden = false;
+  double goldenStartAngle = 0;
+  double goldenAccumulatedTravel = 0;
 }
 
 enum PlanetPattern { bands, craters, core, storm }
