@@ -51,6 +51,19 @@ class _GameScreenState extends State<GameScreen>
   // Last life
   static const int resurrectionStreak = 8;
 
+  // Music sync (procedural BPM clock — matches the 128 BPM main theme)
+  static const double assumedBPM = 128.0;
+  static const double secondsPerBeat = 60.0 / assumedBPM;
+
+  // Intro phase
+  static const double introDuration = 1.6;
+
+  // Layout safety — reserve space for HUD top and lives/hint bottom
+  static const double hudReservedTop = 130;
+  static const double hudReservedBottom = 110;
+  static const double orbitEdgePadding = 18; // glow + planet halo padding
+  static const double orbitInnerRadiusFactor = 0.32; // closest orbit / max
+
   late final Ticker _ticker;
   final Random _random = Random(42);
 
@@ -106,6 +119,21 @@ class _GameScreenState extends State<GameScreen>
   double _gateRotationSpeed = 0;
   int _gateDirection = 1;
   double _gateDirectionFlipCooldown = 0;
+
+  // Game phase (intro → playing)
+  GamePhase _phase = GamePhase.intro;
+  double _introAge = 0;
+
+  // BPM beat clock
+  double _beatPhase = 0; // 0..1 within current beat
+  int _beatCount = 0;
+
+  // Screen shake
+  double _shakeAge = 999;
+  double _shakeMagnitude = 0;
+
+  // Layout — recomputed on size/safeArea change
+  double _maxOrbitRadius = 200;
 
   final List<PlanetStyle> _planetStyles = const [
     PlanetStyle(
@@ -200,6 +228,12 @@ class _GameScreenState extends State<GameScreen>
     _gateRotationSpeed = 0;
     _gateDirection = 1;
     _gateDirectionFlipCooldown = 0;
+    _phase = GamePhase.intro;
+    _introAge = 0;
+    _beatPhase = 0;
+    _beatCount = 0;
+    _shakeAge = 999;
+    _shakeMagnitude = 0;
     _addPlanet();
   }
 
@@ -404,6 +438,65 @@ class _GameScreenState extends State<GameScreen>
   }
 
   double _frenzyLevel() => (_score / 320).clamp(0, 1).toDouble();
+
+  // ---------------- Music sync (procedural BPM beat) ----------------
+
+  /// Returns 0..1 — spikes at start of each beat, decays exponentially.
+  /// Used to pulse star, gate, ambient glow in sync with the music.
+  double _beatPulse() {
+    return exp(-3.6 * _beatPhase);
+  }
+
+  /// Slower oscillation for ambient breathing (one cycle per 4 beats / bar).
+  double _barBreathing() {
+    return 0.5 + 0.5 * sin(2 * pi * (_beatCount % 4 + _beatPhase) / 4);
+  }
+
+  // ---------------- Intro phase ----------------
+
+  /// 0..1 progress of the intro animation (eased).
+  double _introProgressEased() {
+    final t = (_introAge / introDuration).clamp(0.0, 1.0);
+    // Smoothstep
+    return t * t * (3 - 2 * t);
+  }
+
+  // ---------------- Screen shake ----------------
+
+  void _triggerShake(double magnitude) {
+    if (magnitude > _shakeMagnitude || _shakeAge > 0.15) {
+      _shakeMagnitude = magnitude;
+      _shakeAge = 0;
+    }
+  }
+
+  /// Returns current shake offset to apply to the canvas.
+  Offset _shakeOffset() {
+    if (_shakeAge >= 0.45) return Offset.zero;
+    final t = (_shakeAge / 0.45).clamp(0.0, 1.0);
+    final amp = _shakeMagnitude * (1.0 - t);
+    // Pseudo-random offset using time + age
+    final ax = sin(_clock * 71 + _shakeAge * 130) * amp;
+    final ay = cos(_clock * 53 + _shakeAge * 110) * amp;
+    return Offset(ax, ay);
+  }
+
+  // ---------------- Layout (orbits never overflow) ----------------
+
+  /// Recompute the maximum orbit radius from current safe area + reserved HUD.
+  /// Guarantees that even the outermost orbit + planet glow fits inside the
+  /// visible play area on any screen.
+  void _recomputeOrbitLayout(Size size, EdgeInsets safeArea) {
+    final reservedTop = safeArea.top + hudReservedTop;
+    final reservedBottom = safeArea.bottom + hudReservedBottom;
+    final availableHeight =
+        max(120.0, size.height - reservedTop - reservedBottom);
+    final availableWidth = max(120.0, size.width - 2 * orbitEdgePadding);
+    final maxByHeight = availableHeight / 2;
+    final maxByWidth = availableWidth / 2;
+    _maxOrbitRadius =
+        max(80.0, min(maxByHeight, maxByWidth) - orbitEdgePadding);
+  }
 
   // ---------------- Arcade balance plan helpers ----------------
 
@@ -658,6 +751,24 @@ class _GameScreenState extends State<GameScreen>
 
     setState(() {
       _clock += dt;
+      _shakeAge += dt;
+
+      // Advance procedural beat clock (128 BPM by default).
+      // Used to sync star pulse, gate halo, ambient breathing with the music.
+      _beatPhase += dt / secondsPerBeat;
+      while (_beatPhase >= 1.0) {
+        _beatPhase -= 1.0;
+        _beatCount++;
+      }
+
+      // Intro phase advances the introAge; auto-finish when complete.
+      if (_phase == GamePhase.intro) {
+        _introAge += dt;
+        if (_introAge >= introDuration) {
+          _phase = GamePhase.playing;
+        }
+      }
+
       _updateAmbient(dt);
       _updatePlanets(dt);
       _updateParticles(dt);
@@ -844,6 +955,20 @@ class _GameScreenState extends State<GameScreen>
 
   void _onTap() {
     if (_gameEnded || _screenSize == Size.zero || _planets.isEmpty) return;
+
+    // Skip intro on first tap — empower the player from the get-go.
+    if (_phase == GamePhase.intro) {
+      setState(() {
+        _phase = GamePhase.playing;
+        _introAge = introDuration;
+        _gatePulse = 1.0;
+        _flashOpacity = 0.18;
+        _flashColor = Colors.white;
+      });
+      AudioService.playTap();
+      return;
+    }
+
     AudioService.playTap();
 
     final target = _planets[_targetIndex.clamp(0, _planets.length - 1)];
@@ -897,6 +1022,7 @@ class _GameScreenState extends State<GameScreen>
       );
       _flashColor = const Color(0xFFFFE48A);
       _flashOpacity = 0.55;
+      _triggerShake(8.0);
     } else {
       _feedbackText = perfect ? 'PERFECT' : 'NICE';
       _feedbackColor = planet.color;
@@ -908,6 +1034,7 @@ class _GameScreenState extends State<GameScreen>
         perfect ? 30 : 20,
         outwardPower: perfect ? 190 : 145,
       );
+      _triggerShake(perfect ? 4.5 : 2.0);
     }
     _feedbackAge = 0;
 
@@ -938,6 +1065,7 @@ class _GameScreenState extends State<GameScreen>
         _resurrectionAge = 0;
         _flashColor = const Color(0xFFFFE48A);
         _flashOpacity = 0.78;
+        _triggerShake(10.0);
         AudioService.playCombo();
         AudioService.playPerfect();
         _spawnBurst(
@@ -975,7 +1103,10 @@ class _GameScreenState extends State<GameScreen>
     _feedbackAge = 0;
     if (shatter) {
       _shatterAge = 0;
+      _triggerShake(12.0);
       AudioService.playGameOver();
+    } else {
+      _triggerShake(5.0);
     }
     if (_screenSize != Size.zero) {
       _spawnBurst(
@@ -1036,8 +1167,13 @@ class _GameScreenState extends State<GameScreen>
   }
 
   double _orbitRadiusFor(int index, Size size) {
-    final minSide = min(size.width, size.height);
-    return minSide * 0.22 + minSide * 0.105 * index;
+    // Distribute orbits between innerRadius and _maxOrbitRadius.
+    // Outermost (index = maxPlanets-1) sits exactly on _maxOrbitRadius —
+    // this ensures the orbit never overflows the safe play area.
+    final inner = _maxOrbitRadius * orbitInnerRadiusFactor;
+    if (maxPlanets <= 1) return _maxOrbitRadius;
+    final step = (_maxOrbitRadius - inner) / (maxPlanets - 1);
+    return inner + step * index;
   }
 
   double _angleDistance(double a, double b) {
@@ -1078,6 +1214,8 @@ class _GameScreenState extends State<GameScreen>
         builder: (context, constraints) {
           final newSize = Size(constraints.maxWidth, constraints.maxHeight);
           _screenSize = newSize;
+          final safeArea = MediaQuery.of(context).padding;
+          _recomputeOrbitLayout(newSize, safeArea);
           if (_backgroundSize != newSize || _stars.isEmpty)
             _generateBackground(newSize);
 
@@ -1109,6 +1247,12 @@ class _GameScreenState extends State<GameScreen>
                     adrenalineActive: _adrenalineActive,
                     lastLifeActive: _isLastLife,
                     shatterAge: _shatterAge,
+                    maxOrbitRadius: _maxOrbitRadius,
+                    beatPulse: _beatPulse(),
+                    barBreathing: _barBreathing(),
+                    introProgress: _introProgressEased(),
+                    isIntro: _phase == GamePhase.intro,
+                    shakeOffset: _shakeOffset(),
                   ),
                 ),
                 SafeArea(
@@ -1420,6 +1564,12 @@ class TapOrbitPainter extends CustomPainter {
     required this.adrenalineActive,
     required this.lastLifeActive,
     required this.shatterAge,
+    required this.maxOrbitRadius,
+    required this.beatPulse,
+    required this.barBreathing,
+    required this.introProgress,
+    required this.isIntro,
+    required this.shakeOffset,
   });
 
   final List<OrbitPlanet> planets;
@@ -1442,28 +1592,126 @@ class TapOrbitPainter extends CustomPainter {
   final bool adrenalineActive;
   final bool lastLifeActive;
   final double shatterAge;
+  final double maxOrbitRadius;
+  final double beatPulse;
+  final double barBreathing;
+  final double introProgress;
+  final bool isIntro;
+  final Offset shakeOffset;
 
   @override
   void paint(Canvas canvas, Size size) {
     final center = size.center(Offset.zero);
+
+    // Background NEVER shakes (would break the world feel) — paint first.
     _paintBackground(canvas, size);
     _paintSpaceDust(canvas);
     _paintBackgroundPlanets(canvas);
     _paintStars(canvas);
     _paintComets(canvas);
+
+    // Apply screen shake to the playfield only.
+    canvas.save();
+    canvas.translate(shakeOffset.dx, shakeOffset.dy);
+
     _paintOrbitGates(canvas, size, center);
     _paintCenterStar(canvas, center, size);
     _paintRipples(canvas, center);
     _paintPlanetTrails(canvas);
     _paintPlanets(canvas, size, center);
     _paintParticles(canvas);
+
+    canvas.restore();
+
     _paintLives(canvas, size);
     _paintVignettes(canvas, size);
+    _paintIntroOverlay(canvas, size, center);
 
     if (flashOpacity > 0) {
       canvas.drawRect(
         Offset.zero & size,
         Paint()..color = flashColor.withOpacity(flashOpacity),
+      );
+    }
+  }
+
+  void _paintIntroOverlay(Canvas canvas, Size size, Offset center) {
+    if (introProgress >= 1.0) return;
+
+    final t = introProgress;
+    // Full-screen radial pulse — emanates from the star
+    final pulseRadius =
+        lerpDouble(0, max(size.width, size.height), t) ?? 0;
+    final pulseOpacity = (1.0 - t) * 0.55;
+    canvas.drawCircle(
+      center,
+      pulseRadius,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3
+        ..color = const Color(0xFF56E7FF).withOpacity(pulseOpacity)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 12),
+    );
+
+    // Title fade in/out: 0..0.45 fade in, 0.45..0.85 hold, 0.85..1 fade out
+    double titleOpacity;
+    if (t < 0.45) {
+      titleOpacity = t / 0.45;
+    } else if (t < 0.85) {
+      titleOpacity = 1.0;
+    } else {
+      titleOpacity = 1.0 - (t - 0.85) / 0.15;
+    }
+    titleOpacity = titleOpacity.clamp(0.0, 1.0);
+
+    final titlePainter = TextPainter(
+      text: TextSpan(
+        text: 'TAP ORBIT',
+        style: TextStyle(
+          color: Colors.white.withOpacity(titleOpacity),
+          fontSize: 48,
+          fontWeight: FontWeight.w900,
+          letterSpacing: 6,
+          shadows: [
+            Shadow(
+              color: const Color(0xFF56E7FF).withOpacity(titleOpacity),
+              blurRadius: 28,
+            ),
+          ],
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    titlePainter.paint(
+      canvas,
+      Offset(
+        center.dx - titlePainter.width / 2,
+        center.dy + maxOrbitRadius + 40,
+      ),
+    );
+
+    // Subtitle "TAP TO BEGIN" appears in the second half
+    if (t > 0.55) {
+      final subOpacity = ((t - 0.55) / 0.30).clamp(0.0, 1.0);
+      final breath = 0.65 + 0.35 * sin(time * 4.5);
+      final subPainter = TextPainter(
+        text: TextSpan(
+          text: 'TAP TO BEGIN',
+          style: TextStyle(
+            color: Colors.white.withOpacity(subOpacity * breath),
+            fontSize: 14,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 4.0,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      subPainter.paint(
+        canvas,
+        Offset(
+          center.dx - subPainter.width / 2,
+          center.dy + maxOrbitRadius + 96,
+        ),
       );
     }
   }
@@ -1730,13 +1978,17 @@ class TapOrbitPainter extends CustomPainter {
       final radius = _orbitRadiusFor(planet.index, size);
       final color = planet.color;
 
+      // Beat-synced orbit ring: brightens slightly on each beat
+      final beatBoost = 0.05 * beatPulse;
       canvas.drawCircle(
         center,
         radius,
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeWidth = active ? 1.5 : 0.8
-          ..color = color.withOpacity(active ? 0.20 : 0.08),
+          ..color = color.withOpacity(
+              (active ? 0.20 : 0.08) + beatBoost,
+            ),
       );
 
       if (!active) continue;
@@ -1757,9 +2009,13 @@ class TapOrbitPainter extends CustomPainter {
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeCap = StrokeCap.round
-          ..strokeWidth = 12 + gatePulse * 6 + frenzy * 2.4
+          ..strokeWidth = 12 + gatePulse * 6 + frenzy * 2.4 + beatPulse * 3
           ..color = color.withOpacity(
-            0.10 + eased * 0.10 + gatePulse * 0.15 + frenzy * 0.08,
+            0.10 +
+                eased * 0.10 +
+                gatePulse * 0.15 +
+                frenzy * 0.08 +
+                beatPulse * 0.07,
           )
           ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 14),
       );
@@ -1843,9 +2099,22 @@ class TapOrbitPainter extends CustomPainter {
   }
 
   void _paintCenterStar(Canvas canvas, Offset center, Size size) {
-    final sunPulse = 1.0 + sin(time * (2.6 + frenzy * 2.0)) * 0.06;
+    // Beat-synced pulse: spike on each beat, breathing on each bar.
+    // The star "breathes" with the music (procedural BPM clock).
+    final beatBoost = 1.0 + beatPulse * 0.18;
+    final breath = 1.0 + (barBreathing - 0.5) * 0.06;
+    final sunPulse = beatBoost * breath +
+        sin(time * (2.6 + frenzy * 2.0)) * 0.03;
+
+    // Intro: the star "ignites" — grows from 0 with bounce.
+    final introScale = isIntro
+        ? Curves.elasticOut.transform(introProgress)
+        : 1.0;
+
     final coreRadius =
-        min(size.width, size.height) * (0.04 + frenzy * 0.005) * sunPulse;
+        min(size.width, size.height) * (0.04 + frenzy * 0.005) *
+            sunPulse *
+            introScale;
     final sunStyle = PlanetStyle(
       base: const Color(0xFFFFB347),
       shadow: const Color(0xFFB85E00),
@@ -2551,9 +2820,16 @@ class TapOrbitPainter extends CustomPainter {
         .toColor();
   }
 
-  double _orbitRadiusFor(int index, Size size) =>
-      min(size.width, size.height) * 0.22 +
-      min(size.width, size.height) * 0.105 * index;
+  double _orbitRadiusFor(int index, Size size) {
+    // Mirrors the state-side formula. Distributes orbits between
+    // inner = 32% of max and the safe-area-aware max.
+    const innerFactor = 0.32;
+    const maxOrbits = 4;
+    final inner = maxOrbitRadius * innerFactor;
+    if (maxOrbits <= 1) return maxOrbitRadius;
+    final step = (maxOrbitRadius - inner) / (maxOrbits - 1);
+    return inner + step * index;
+  }
 
   @override
   bool shouldRepaint(covariant TapOrbitPainter oldDelegate) => true;
@@ -2616,6 +2892,8 @@ class OrbitPlanet {
 }
 
 enum PlanetPattern { bands, craters, core, storm }
+
+enum GamePhase { intro, playing, gameOver }
 
 class PlanetStyle {
   const PlanetStyle({
