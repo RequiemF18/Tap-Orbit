@@ -3,9 +3,11 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'audio_service.dart';
+import 'beatmap_service.dart';
 import 'game_over.dart';
 
 class GameScreen extends StatefulWidget {
@@ -78,6 +80,7 @@ class _GameScreenState extends State<GameScreen>
   final List<BackgroundPlanet> _backgroundPlanets = [];
   final List<SpaceDustParticle> _spaceDust = [];
   final List<CometTrail> _comets = [];
+  final List<ScorePopup> _popups = [];
 
   int _score = 0;
   int _lives = maxLives;
@@ -134,6 +137,24 @@ class _GameScreenState extends State<GameScreen>
 
   // Layout — recomputed on size/safeArea change
   double _maxOrbitRadius = 200;
+
+  // Combo tier-up toast (announces when crossing into Charged/Overdrive/etc.)
+  String _comboUnlockText = '';
+  String _comboUnlockSubtitle = '';
+  double _comboUnlockAge = 999;
+
+  // First-hit dopamine — first 3 hits feel BIGGER
+  // Tracks how many hits since reset to enable special feedback for 1,2,3
+  // (Same as _totalHits but used here for clarity at the call site)
+
+  // Hit-stop — early-game perfects briefly freeze time for 80ms (game feel)
+  double _hitStopRemaining = 0;
+
+  // Demo phantom planet — visible during intro to teach the mechanic visually
+  double _demoPlanetAngle = -pi / 2 - 1.2; // starts left of the gate
+
+  // Ignition shockwave (first tap)
+  bool _ignitionTriggered = false;
 
   final List<PlanetStyle> _planetStyles = const [
     PlanetStyle(
@@ -234,6 +255,13 @@ class _GameScreenState extends State<GameScreen>
     _beatCount = 0;
     _shakeAge = 999;
     _shakeMagnitude = 0;
+    _popups.clear();
+    _comboUnlockText = '';
+    _comboUnlockSubtitle = '';
+    _comboUnlockAge = 999;
+    _hitStopRemaining = 0;
+    _demoPlanetAngle = -pi / 2 - 1.2;
+    _ignitionTriggered = false;
     _addPlanet();
   }
 
@@ -439,16 +467,36 @@ class _GameScreenState extends State<GameScreen>
 
   double _frenzyLevel() => (_score / 320).clamp(0, 1).toDouble();
 
-  // ---------------- Music sync (procedural BPM beat) ----------------
+  // ---------------- Music sync (real beatmap with fallback) ----------------
 
-  /// Returns 0..1 — spikes at start of each beat, decays exponentially.
-  /// Used to pulse star, gate, ambient glow in sync with the music.
+  /// Returns 0..1 — spikes on each detected musical beat, decays exponentially.
+  /// Uses the real beatmap (librosa-analyzed) when loaded; falls back to
+  /// procedural 128 BPM if the JSON is missing.
   double _beatPulse() {
+    if (BeatmapService.instance.isLoaded) {
+      return BeatmapService.instance.pulse;
+    }
     return exp(-3.6 * _beatPhase);
   }
 
-  /// Slower oscillation for ambient breathing (one cycle per 4 beats / bar).
+  /// Energy of the current section (intro / build_up / drop / outro).
+  /// 0..1, used to modulate ambient effects globally.
+  double _sectionEnergy() {
+    if (BeatmapService.instance.isLoaded) {
+      return BeatmapService.instance.sectionEnergy;
+    }
+    return 0.5;
+  }
+
+  /// Slower oscillation for ambient breathing.
+  /// With real beatmap: phase-locked to bars (4 beats); without: procedural.
   double _barBreathing() {
+    if (BeatmapService.instance.isLoaded) {
+      // Smooth oscillation tied to section energy + the beat clock
+      final t = _clock;
+      final sectionPulse = 0.5 + 0.5 * sin(t * 0.55);
+      return sectionPulse * (0.6 + _sectionEnergy() * 0.4);
+    }
     return 0.5 + 0.5 * sin(2 * pi * (_beatCount % 4 + _beatPhase) / 4);
   }
 
@@ -753,12 +801,23 @@ class _GameScreenState extends State<GameScreen>
       _clock += dt;
       _shakeAge += dt;
 
-      // Advance procedural beat clock (128 BPM by default).
-      // Used to sync star pulse, gate halo, ambient breathing with the music.
-      _beatPhase += dt / secondsPerBeat;
-      while (_beatPhase >= 1.0) {
-        _beatPhase -= 1.0;
-        _beatCount++;
+      // Advance the beat clock.
+      // Primary path: beatmap-driven sync against actual audio playback.
+      // Fallback: procedural 128 BPM clock (same behavior as before).
+      if (BeatmapService.instance.isLoaded) {
+        // Cheap interpolated polling — refreshes every ~100ms,
+        // interpolated on every frame in between.
+        AudioService.positionTracker.tick(dt);
+        BeatmapService.instance.tick(
+          dt,
+          AudioService.positionTracker.currentPositionMs,
+        );
+      } else {
+        _beatPhase += dt / secondsPerBeat;
+        while (_beatPhase >= 1.0) {
+          _beatPhase -= 1.0;
+          _beatCount++;
+        }
       }
 
       // Intro phase advances the introAge; auto-finish when complete.
@@ -769,10 +828,24 @@ class _GameScreenState extends State<GameScreen>
         }
       }
 
-      _updateAmbient(dt);
-      _updatePlanets(dt);
-      _updateParticles(dt);
-      _updateRipples(dt);
+      // Hit-stop — early-game perfect freezes time briefly for impact feel
+      double effectiveDt = dt;
+      if (_hitStopRemaining > 0) {
+        _hitStopRemaining = max(0, _hitStopRemaining - dt);
+        effectiveDt = dt * 0.15; // simulate freeze without skipping the tick
+      }
+
+      _updateAmbient(effectiveDt);
+      _updatePlanets(effectiveDt);
+      _updateParticles(effectiveDt);
+      _updateRipples(effectiveDt);
+      _updatePopups(effectiveDt);
+      _comboUnlockAge += dt;
+
+      // Demo phantom planet animates during intro to teach the mechanic
+      if (_phase == GamePhase.intro) {
+        _demoPlanetAngle += 1.7 * dt;
+      }
       _flashOpacity = max(0, _flashOpacity - dt / 0.20);
       _comboPulse = max(0, _comboPulse - dt / 0.28);
       _gatePulse = max(0, _gatePulse - dt / 0.22);
@@ -944,6 +1017,16 @@ class _GameScreenState extends State<GameScreen>
     _particles.removeWhere(dead.contains);
   }
 
+  void _updatePopups(double dt) {
+    final dead = <ScorePopup>[];
+    for (final pop in _popups) {
+      pop.age += dt;
+      pop.position = Offset(pop.position.dx, pop.position.dy - 60 * dt);
+      if (pop.age >= ScorePopup.duration) dead.add(pop);
+    }
+    _popups.removeWhere(dead.contains);
+  }
+
   void _updateRipples(double dt) {
     final dead = <TapRipple>[];
     for (final ripple in _ripples) {
@@ -957,18 +1040,33 @@ class _GameScreenState extends State<GameScreen>
     if (_gameEnded || _screenSize == Size.zero || _planets.isEmpty) return;
 
     // Skip intro on first tap — empower the player from the get-go.
+    // Big ignition shockwave, screen flash, gate pulse, haptic bump.
     if (_phase == GamePhase.intro) {
       setState(() {
         _phase = GamePhase.playing;
         _introAge = introDuration;
         _gatePulse = 1.0;
-        _flashOpacity = 0.18;
+        _flashOpacity = 0.42;
         _flashColor = Colors.white;
+        _ignitionTriggered = true;
+        // Spawn a big ripple from the center for visual punch
+        if (_screenSize != Size.zero) {
+          _ripples.add(
+            TapRipple(
+              color: const Color(0xFF56E7FF),
+              radius: _maxOrbitRadius * 1.6,
+            ),
+          );
+        }
       });
+      _triggerShake(6.5);
+      HapticFeedback.mediumImpact();
       AudioService.playTap();
+      AudioService.playPerfect();
       return;
     }
 
+    HapticFeedback.selectionClick();
     AudioService.playTap();
 
     final target = _planets[_targetIndex.clamp(0, _planets.length - 1)];
@@ -1051,8 +1149,37 @@ class _GameScreenState extends State<GameScreen>
     if (tierAfter > tierBefore) {
       AudioService.playCombo();
       _comboPulse = 1.0;
+      // Announce combo tier-up — dopamine ladder
+      _comboUnlockText = 'COMBO x${_comboMultiplier()}';
+      _comboUnlockSubtitle = _comboTierName();
+      _comboUnlockAge = 0;
+      HapticFeedback.mediumImpact();
     } else if (perfect || wasGolden) {
       _comboPulse = 1.0;
+    }
+
+    // Floating "+N" popup at impact — visceral score feedback every hit
+    _popups.add(
+      ScorePopup(
+        position: impact,
+        value: gain,
+        color: wasGolden ? const Color(0xFFFFD24D) : planet.color,
+        golden: wasGolden,
+      ),
+    );
+
+    // Haptic feedback layers
+    if (wasGolden) {
+      HapticFeedback.heavyImpact();
+    } else if (perfect) {
+      HapticFeedback.mediumImpact();
+    } else {
+      HapticFeedback.lightImpact();
+    }
+
+    // Hit-stop on perfect during early game (first 10 hits) — tactile impact
+    if (perfect && _totalHits <= 10) {
+      _hitStopRemaining = 0.08;
     }
 
     // ----- Last life resurrection -----
@@ -1104,9 +1231,11 @@ class _GameScreenState extends State<GameScreen>
     if (shatter) {
       _shatterAge = 0;
       _triggerShake(12.0);
+      HapticFeedback.heavyImpact();
       AudioService.playGameOver();
     } else {
       _triggerShake(5.0);
+      HapticFeedback.mediumImpact();
     }
     if (_screenSize != Size.zero) {
       _spawnBurst(
@@ -1207,6 +1336,10 @@ class _GameScreenState extends State<GameScreen>
     final resurrectionOpacity = resurrectionVisible
         ? (1.0 - (_resurrectionAge / 1.5).clamp(0.0, 1.0)).clamp(0.0, 1.0)
         : 0.0;
+    final comboUnlockVisible = _comboUnlockAge < 1.0;
+    final comboUnlockOpacity = comboUnlockVisible
+        ? (1.0 - (_comboUnlockAge / 1.0).clamp(0.0, 1.0)).clamp(0.0, 1.0)
+        : 0.0;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -1253,6 +1386,8 @@ class _GameScreenState extends State<GameScreen>
                     introProgress: _introProgressEased(),
                     isIntro: _phase == GamePhase.intro,
                     shakeOffset: _shakeOffset(),
+                    popups: _popups,
+                    demoPlanetAngle: _demoPlanetAngle,
                   ),
                 ),
                 SafeArea(
@@ -1463,6 +1598,45 @@ class _GameScreenState extends State<GameScreen>
                       ),
                     ),
                   ),
+                if (comboUnlockOpacity > 0)
+                  IgnorePointer(
+                    child: Align(
+                      alignment: const Alignment(0, -0.35),
+                      child: Opacity(
+                        opacity: comboUnlockOpacity,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _comboUnlockText,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 26,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 3.0,
+                                shadows: [
+                                  Shadow(
+                                    color: Colors.cyanAccent,
+                                    blurRadius: 22,
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              _comboUnlockSubtitle,
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 3.5,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
                 if (resurrectionOpacity > 0)
                   IgnorePointer(
                     child: Center(
@@ -1570,6 +1744,8 @@ class TapOrbitPainter extends CustomPainter {
     required this.introProgress,
     required this.isIntro,
     required this.shakeOffset,
+    required this.popups,
+    required this.demoPlanetAngle,
   });
 
   final List<OrbitPlanet> planets;
@@ -1598,6 +1774,8 @@ class TapOrbitPainter extends CustomPainter {
   final double introProgress;
   final bool isIntro;
   final Offset shakeOffset;
+  final List<ScorePopup> popups;
+  final double demoPlanetAngle;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1623,6 +1801,7 @@ class TapOrbitPainter extends CustomPainter {
 
     canvas.restore();
 
+    _paintScorePopups(canvas);
     _paintLives(canvas, size);
     _paintVignettes(canvas, size);
     _paintIntroOverlay(canvas, size, center);
@@ -1635,8 +1814,70 @@ class TapOrbitPainter extends CustomPainter {
     }
   }
 
+  void _paintScorePopups(Canvas canvas) {
+    for (final pop in popups) {
+      final t = (pop.age / ScorePopup.duration).clamp(0.0, 1.0);
+      final opacity = (1.0 - t).clamp(0.0, 1.0);
+      // Pop-in scale: quick burst then settle
+      final scale = t < 0.18
+          ? lerpDouble(1.6, 1.0, t / 0.18) ?? 1.0
+          : 1.0;
+      final fontSize = (pop.golden ? 22.0 : 17.0) * scale;
+      final tp = TextPainter(
+        text: TextSpan(
+          text: '+${pop.value}',
+          style: TextStyle(
+            color: pop.color.withOpacity(opacity),
+            fontSize: fontSize,
+            fontWeight: FontWeight.w900,
+            letterSpacing: 1.2,
+            shadows: [
+              Shadow(
+                color: pop.color.withOpacity(opacity),
+                blurRadius: pop.golden ? 16 : 10,
+              ),
+            ],
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(
+        canvas,
+        Offset(pop.position.dx - tp.width / 2, pop.position.dy - tp.height / 2),
+      );
+    }
+  }
+
   void _paintIntroOverlay(Canvas canvas, Size size, Offset center) {
     if (introProgress >= 1.0) return;
+
+    // Demo phantom planet — orbits the first ring teaching the mechanic.
+    // Brightens when crossing the gate so the player understands "tap there".
+    final demoOpacity = (introProgress * 1.3).clamp(0.0, 1.0);
+    final demoRadius = maxOrbitRadius * 0.32;
+    final demoPos = Offset(
+      center.dx + cos(demoPlanetAngle) * demoRadius,
+      center.dy + sin(demoPlanetAngle) * demoRadius,
+    );
+    final atGate = (cos(demoPlanetAngle - (-pi / 2))).clamp(-1.0, 1.0);
+    final near = ((atGate + 1) / 2 * 1.1).clamp(0.0, 1.0);
+    canvas.drawCircle(
+      demoPos,
+      14 + near * 4,
+      Paint()
+        ..color = const Color(0xFF56E7FF).withOpacity(0.20 * demoOpacity * near)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 14),
+    );
+    canvas.drawCircle(
+      demoPos,
+      6 + near * 2,
+      Paint()..color = const Color(0xFF56E7FF).withOpacity(0.85 * demoOpacity),
+    );
+    canvas.drawCircle(
+      demoPos,
+      3,
+      Paint()..color = Colors.white.withOpacity(0.95 * demoOpacity),
+    );
 
     final t = introProgress;
     // Full-screen radial pulse — emanates from the star
@@ -2919,6 +3160,24 @@ class PlanetStyle {
   final PlanetPattern pattern;
   final bool hasRing;
   final bool hasMoon;
+}
+
+/// Floating "+N" toast that pops from the impact and floats up while fading.
+/// Provides per-hit visual scoring feedback so the player FEELS the points.
+class ScorePopup {
+  ScorePopup({
+    required this.position,
+    required this.value,
+    required this.color,
+    this.golden = false,
+  });
+
+  Offset position;
+  final int value;
+  final Color color;
+  final bool golden;
+  double age = 0;
+  static const double duration = 0.85;
 }
 
 class TapRipple {
