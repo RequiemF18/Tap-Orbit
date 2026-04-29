@@ -53,6 +53,32 @@ class _GameScreenState extends State<GameScreen>
   // Last life
   static const int resurrectionStreak = 8;
 
+  // ---------------- Orbit Rush — multi-gate distribution rules ----------------
+
+  /// How far AHEAD of the planet the gate spawns.
+  /// Min 1.0 rad (~57°), max 1.85 rad (~106°). Player has 0.5-1.5s to react.
+  static const double gateAheadMin = 1.0;
+  static const double gateAheadMax = 1.85;
+
+  /// Lifetime of a gate (seconds). Shrinks with milestone tier.
+  static const double gateLifetimeBase = 2.6;
+  static const double gateLifetimeMin = 1.2;
+
+  /// Recency window — last N spawns we remember when balancing orbit selection.
+  /// Higher = stricter rotation across orbits.
+  static const int recentSpawnHistorySize = 6;
+
+  /// Hard cap: never allow the same orbit to receive more than this many
+  /// CONSECUTIVE spawns even if its weight wins. Forces real rotation.
+  static const int maxConsecutiveSpawnsSameOrbit = 2;
+
+  /// How many candidate angles to try when finding a non-overlapping spot.
+  static const int gateAngleSearchAttempts = 12;
+
+  // Bonus gates
+  static const double bonusGateWidthMult = 0.65;
+  static const int bonusGateScoreMult = 3;
+
   // Music sync (procedural BPM clock — matches the 128 BPM main theme)
   static const double assumedBPM = 128.0;
   static const double secondsPerBeat = 60.0 / assumedBPM;
@@ -155,6 +181,23 @@ class _GameScreenState extends State<GameScreen>
 
   // Ignition shockwave (first tap)
   bool _ignitionTriggered = false;
+
+  // ---------------- Orbit Rush — multi-gate state ----------------
+  /// All currently active gates across all orbits. Each is independent and
+  /// has its own lifetime and angle. Rendered + checked for tap detection.
+  final List<Gate> _gates = [];
+
+  /// Last N planet indices we spawned gates on. Used to balance distribution
+  /// (penalize over-used orbits, prefer stale ones). Capped at
+  /// [recentSpawnHistorySize].
+  final List<int> _recentSpawnPlanetIndices = [];
+
+  /// Combo Meter — drains over time, refills on hit. If empties → combo
+  /// resets (NO life lost — pressure, not punishment). 0..1.
+  double _comboMeter = 1.0;
+
+  /// Anti-spam guard for beat-synced bonus gate spawning.
+  double _lastBeatSpawnGuardS = 0;
 
   final List<PlanetStyle> _planetStyles = const [
     PlanetStyle(
@@ -262,6 +305,10 @@ class _GameScreenState extends State<GameScreen>
     _hitStopRemaining = 0;
     _demoPlanetAngle = -pi / 2 - 1.2;
     _ignitionTriggered = false;
+    _gates.clear();
+    _recentSpawnPlanetIndices.clear();
+    _comboMeter = 1.0;
+    _lastBeatSpawnGuardS = 0;
     _addPlanet();
   }
 
@@ -466,6 +513,237 @@ class _GameScreenState extends State<GameScreen>
   }
 
   double _frenzyLevel() => (_score / 320).clamp(0, 1).toDouble();
+
+  // ============================================================
+  // Orbit Rush — multi-gate spawn engine (balanced across orbits)
+  // ============================================================
+
+  /// Maximum gates allowed simultaneously on a SINGLE orbit. Grows with
+  /// difficulty so early game stays clean and readable.
+  ///
+  /// Score 0-9   → 1 (one barra por órbita)
+  /// Score 10-24 → 1 (still strict, just more total)
+  /// Score 25-49 → 2 (DRIFT — can stack, but with separation)
+  /// Score 50-99 → 2 (FLUX still 2)
+  /// Score 100+  → 3 (SINGULARITY — full chaos)
+  int _maxGatesPerOrbit() {
+    if (_score >= 100) return 3;
+    if (_score >= 25) return 2;
+    return 1;
+  }
+
+  /// Total gates allowed in scene at once. Drives perceived intensity.
+  /// Score 0-9   → 1 (one bar visible at a time)
+  /// Score 10-24 → 2
+  /// Score 25-49 → 3
+  /// Score 50+   → 4-5
+  int _maxGatesTotal() {
+    if (_score >= 100) return 5;
+    if (_score >= 50) return 4;
+    if (_score >= 25) return 3;
+    if (_score >= 10) return 2;
+    return 1;
+  }
+
+  /// Minimum angular separation (radians) between gates on the SAME orbit.
+  /// Higher = cleaner visuals. Never below 30°.
+  ///
+  /// Score 0-24  → 90°  (1.57 rad) — only ever 1 per orbit anyway
+  /// Score 25-49 → 60°  (1.05 rad)
+  /// Score 50-99 → 45°  (0.79 rad)
+  /// Score 100+  → 35°  (0.61 rad)
+  double _minAngularSeparation() {
+    if (_score >= 100) return pi / 5.1;     // ~35°
+    if (_score >= 50) return pi / 4.0;       // 45°
+    if (_score >= 25) return pi / 3.0;       // 60°
+    return pi / 2.0;                         // 90°
+  }
+
+  /// Wraps an angle to [-pi, pi].
+  double _wrapAngleSigned(double a) {
+    while (a > pi) a -= 2 * pi;
+    while (a < -pi) a += 2 * pi;
+    return a;
+  }
+
+  /// Lifetime of a freshly spawned gate (seconds). Shrinks with tier.
+  double _gateLifetime({bool bonus = false}) {
+    final t = (_milestoneTier / 4.0).clamp(0.0, 1.0);
+    final base = lerpDouble(gateLifetimeBase, gateLifetimeMin, t)!;
+    return bonus ? base * 0.7 : base;
+  }
+
+  /// How many of the last N spawns went to a given orbit.
+  int _recentSpawnsOn(int planetIndex) {
+    return _recentSpawnPlanetIndices.where((i) => i == planetIndex).length;
+  }
+
+  /// True if the last [maxConsecutiveSpawnsSameOrbit] spawns ALL went to the
+  /// given planetIndex. We force rotation when this happens.
+  bool _isOrbitOverused(int planetIndex) {
+    if (_recentSpawnPlanetIndices.length < maxConsecutiveSpawnsSameOrbit) {
+      return false;
+    }
+    final tail = _recentSpawnPlanetIndices.sublist(
+      _recentSpawnPlanetIndices.length - maxConsecutiveSpawnsSameOrbit,
+    );
+    return tail.every((i) => i == planetIndex);
+  }
+
+  /// Number of currently active gates on the given orbit.
+  int _gatesOnOrbit(int planetIndex) =>
+      _gates.where((g) => g.planetIndex == planetIndex).length;
+
+  /// Picks a playable orbit for the next gate using a balanced weighted
+  /// selection algorithm:
+  ///
+  ///   1. Filter out planets that already have [_maxGatesPerOrbit] gates
+  ///   2. Filter out planets that have hit the consecutive-spawn cap
+  ///      (unless they're the only option)
+  ///   3. Score each remaining orbit:
+  ///      - higher base weight if rarely used recently
+  ///      - lower weight if it currently holds many gates
+  ///      - small random tiebreaker to avoid robotic patterns
+  ///   4. Return the highest-scoring orbit
+  ///
+  /// Returns null if no orbit can take a new gate right now.
+  OrbitPlanet? _chooseSpawnOrbit() {
+    if (_planets.isEmpty) return null;
+
+    final perOrbitMax = _maxGatesPerOrbit();
+    final eligible = _planets.where((p) {
+      return _gatesOnOrbit(p.index) < perOrbitMax;
+    }).toList();
+    if (eligible.isEmpty) return null;
+
+    // Soft rule: try to skip orbits that just got two consecutive spawns
+    var pool = eligible.where((p) => !_isOrbitOverused(p.index)).toList();
+    if (pool.isEmpty) pool = eligible;
+
+    // Deterministic weighted score
+    double weightFor(OrbitPlanet p) {
+      final activeOnP = _gatesOnOrbit(p.index);
+      final recentCount = _recentSpawnsOn(p.index);
+      // Less weight if currently loaded or recently spawned on
+      return -activeOnP * 2.0 - recentCount * 1.2 + _random.nextDouble() * 0.4;
+    }
+
+    pool.sort((a, b) => weightFor(b).compareTo(weightFor(a)));
+    return pool.first;
+  }
+
+  /// Finds an angle on the given orbit that:
+  ///   - is AHEAD of the planet (in its direction of travel)
+  ///   - keeps [_minAngularSeparation] from every existing gate on that orbit
+  /// Returns null if no valid spot is found in [gateAngleSearchAttempts] tries.
+  double? _findValidGateAngle(OrbitPlanet planet) {
+    final dir = planet.speed >= 0 ? 1.0 : -1.0;
+    final minSep = _minAngularSeparation();
+    final existing = _gates.where((g) => g.planetIndex == planet.index).toList();
+
+    for (int attempt = 0; attempt < gateAngleSearchAttempts; attempt++) {
+      final aheadOffset =
+          lerpDouble(gateAheadMin, gateAheadMax, _random.nextDouble())!;
+      final candidate = _wrapAngleSigned(planet.angle + dir * aheadOffset);
+
+      final ok = existing
+          .every((g) => _angleDistance(candidate, g.angle) >= minSep);
+      if (ok) return candidate;
+    }
+    return null;
+  }
+
+  /// Spawns a single gate on a balanced-chosen orbit at a non-overlapping
+  /// angle. Respects [_maxGatesTotal]. Returns true if a gate was actually
+  /// added.
+  bool _spawnGate({GateType type = GateType.normal}) {
+    if (_gates.length >= _maxGatesTotal()) return false;
+
+    final orbit = _chooseSpawnOrbit();
+    if (orbit == null) return false;
+
+    final angle = _findValidGateAngle(orbit);
+    if (angle == null) return false;
+
+    final isBonus = type == GateType.bonus;
+    final width = isBonus ? hitWindow * bonusGateWidthMult : hitWindow;
+
+    _gates.add(
+      Gate(
+        planetIndex: orbit.index,
+        angle: angle,
+        halfWidth: width,
+        lifetime: _gateLifetime(bonus: isBonus),
+        color: isBonus ? const Color(0xFFFFD24D) : orbit.color,
+        type: type,
+      ),
+    );
+
+    _recentSpawnPlanetIndices.add(orbit.index);
+    while (_recentSpawnPlanetIndices.length > recentSpawnHistorySize) {
+      _recentSpawnPlanetIndices.removeAt(0);
+    }
+    return true;
+  }
+
+  /// Per-frame gate engine: ages gates, removes dead ones, tops up to
+  /// [_maxGatesTotal], and sprinkles bonus gates on strong music beats.
+  void _updateGates(double dt) {
+    // 1. Age all gates and collect dead ones
+    final dead = <Gate>[];
+    for (final g in _gates) {
+      g.age += dt;
+      if (g.isDead) dead.add(g);
+    }
+
+    // 2. Punish letting an active gate expire (combo meter takes a hit)
+    for (final d in dead) {
+      if (!d.consumed) {
+        _comboMeter = max(0, _comboMeter - 0.18);
+      }
+    }
+    _gates.removeWhere(dead.contains);
+
+    // 3. Top up scene to desired total — distributed across orbits
+    int safety = 4;
+    while (_gates.length < _maxGatesTotal() && safety > 0) {
+      if (!_spawnGate()) break;
+      safety--;
+    }
+
+    // 4. Beat-synced bonus gate (only score >= 8, only on strong snares)
+    _lastBeatSpawnGuardS += dt;
+    if (_lastBeatSpawnGuardS > 0.9 &&
+        _score >= 8 &&
+        _random.nextDouble() < 0.35) {
+      // Without a real beatmap-loaded service we just gate by interval.
+      _spawnGate(type: GateType.bonus);
+      _lastBeatSpawnGuardS = 0;
+    }
+  }
+
+  /// Combo Meter drains over time. If it hits 0 with hitStreak >= 3, the
+  /// combo resets (NO life lost — this is pressure, not punishment).
+  void _updateComboMeter(double dt) {
+    if (_hitStreak == 0) {
+      _comboMeter = 0;
+      return;
+    }
+    // Higher tier = faster drain (more pressure)
+    final tier = _comboTier();
+    final budget = [4.0, 3.2, 2.5, 2.0, 1.6][tier.clamp(0, 4)];
+    _comboMeter = max(0, _comboMeter - dt / budget);
+    if (_comboMeter <= 0 && _hitStreak >= 3) {
+      _hitStreak = 0;
+      _comboMeter = 0;
+      _flashColor = const Color(0xFFFF8866);
+      _flashOpacity = 0.30;
+      _feedbackText = 'COMBO LOST';
+      _feedbackColor = const Color(0xFFFF8866);
+      _feedbackAge = 0;
+      HapticFeedback.lightImpact();
+    }
+  }
 
   // ---------------- Music sync (real beatmap with fallback) ----------------
 
@@ -840,6 +1118,11 @@ class _GameScreenState extends State<GameScreen>
       _updateParticles(effectiveDt);
       _updateRipples(effectiveDt);
       _updatePopups(effectiveDt);
+      // Orbit Rush — gate engine + combo meter (only during active play)
+      if (_phase == GamePhase.playing && !_gameEnded) {
+        _updateGates(effectiveDt);
+        _updateComboMeter(effectiveDt);
+      }
       _comboUnlockAge += dt;
 
       // Demo phantom planet animates during intro to teach the mechanic
@@ -1069,41 +1352,75 @@ class _GameScreenState extends State<GameScreen>
     HapticFeedback.selectionClick();
     AudioService.playTap();
 
-    final target = _planets[_targetIndex.clamp(0, _planets.length - 1)];
-    final distance = _angleDistance(target.angle, _currentGateAngle);
     final center = _screenSize.center(Offset.zero);
-    final radius = _orbitRadiusFor(target.index, _screenSize);
-    final gatePosition = Offset(
-      center.dx + cos(_currentGateAngle) * radius,
-      center.dy + sin(_currentGateAngle) * radius,
-    );
 
-    _ripples.add(TapRipple(color: target.color, radius: radius));
-    _gatePulse = 1.0;
+    // Orbit Rush: scan ALL gates on ALL orbits, not just the "target" one.
+    // Pick the gate whose planet is currently inside it (closest if multiple).
+    Gate? hitGate;
+    OrbitPlanet? hitPlanet;
+    double bestDist = double.infinity;
+    for (final g in _gates) {
+      if (g.planetIndex < 0 || g.planetIndex >= _planets.length) continue;
+      final p = _planets[g.planetIndex];
+      final d = _angleDistance(p.angle, g.angle);
+      if (d <= g.halfWidth && d < bestDist) {
+        hitGate = g;
+        hitPlanet = p;
+        bestDist = d;
+      }
+    }
 
-    final hw = _currentHitWindow();
-    final pw = _currentPerfectWindow();
-    if (distance <= hw) {
-      _handleHit(target, distance <= pw, gatePosition);
+    if (hitGate != null && hitPlanet != null) {
+      final radius = _orbitRadiusFor(hitPlanet.index, _screenSize);
+      final gatePosition = Offset(
+        center.dx + cos(hitGate.angle) * radius,
+        center.dy + sin(hitGate.angle) * radius,
+      );
+      _ripples.add(TapRipple(color: hitGate.color, radius: radius));
+      _gatePulse = 1.0;
+      // Update visual focus (HUD color) to follow where the action happened
+      _targetIndex = hitPlanet.index;
+      // Perfect threshold scales with bonus gates (stricter)
+      final perfectAbs = perfectWindow * (hitGate.isBonus ? 0.7 : 1.0);
+      final isPerfect = bestDist <= perfectAbs;
+      hitGate.consumed = true;
+      _gates.remove(hitGate);
+      _handleHit(hitPlanet, isPerfect, gatePosition, gateHit: hitGate);
     } else {
-      _handleMiss('MISS', target.color);
+      // True miss — no gate was hit
+      final fallback = _planets[_targetIndex.clamp(0, _planets.length - 1)];
+      final radius = _orbitRadiusFor(fallback.index, _screenSize);
+      _ripples.add(TapRipple(color: fallback.color, radius: radius));
+      _gatePulse = 1.0;
+      _handleMiss('MISS', fallback.color);
     }
   }
 
-  void _handleHit(OrbitPlanet planet, bool perfect, Offset impact) {
+  void _handleHit(
+    OrbitPlanet planet,
+    bool perfect,
+    Offset impact, {
+    Gate? gateHit,
+  }) {
     final wasGolden = planet.isGolden;
+    final wasBonus = gateHit?.isBonus ?? false;
     final tierBefore = _comboTier();
 
     _totalHits++;
     _hitStreak++;
     _bestCombo = max(_bestCombo, _hitStreak);
 
-    // ----- Scoring per arcade balance plan -----
-    // base = 1 * multiplier ; perfect = base + 1 ; golden = base * 3 ; last life = +1
+    // Refill the combo meter on every successful hit (Orbit Rush pressure)
+    _comboMeter = 1.0;
+
+    // ----- Scoring -----
+    // base = mult ; perfect = base + 1 ; golden = base * 3 ;
+    // bonus gate = base * 3 ; last life = +1
     final mult = _comboMultiplier();
     int gain = mult;
     if (perfect) gain += 1;
     if (wasGolden) gain *= 3;
+    if (wasBonus) gain *= bonusGateScoreMult;
     if (_isLastLife) gain += 1;
     _score += gain;
 
@@ -1121,6 +1438,18 @@ class _GameScreenState extends State<GameScreen>
       _flashColor = const Color(0xFFFFE48A);
       _flashOpacity = 0.55;
       _triggerShake(8.0);
+    } else if (wasBonus) {
+      _feedbackText = 'BONUS!';
+      _feedbackColor = const Color(0xFFFFD24D);
+      _flashColor = const Color(0xFFFFE48A);
+      _flashOpacity = 0.55;
+      _spawnBurst(
+        impact,
+        const Color(0xFFFFD24D),
+        38,
+        outwardPower: 220,
+      );
+      _triggerShake(7.0);
     } else {
       _feedbackText = perfect ? 'PERFECT' : 'NICE';
       _feedbackColor = planet.color;
@@ -1163,8 +1492,10 @@ class _GameScreenState extends State<GameScreen>
       ScorePopup(
         position: impact,
         value: gain,
-        color: wasGolden ? const Color(0xFFFFD24D) : planet.color,
-        golden: wasGolden,
+        color: (wasGolden || wasBonus)
+            ? const Color(0xFFFFD24D)
+            : planet.color,
+        golden: wasGolden || wasBonus,
       ),
     );
 
@@ -1212,8 +1543,15 @@ class _GameScreenState extends State<GameScreen>
     // ----- Spawning new orbits -----
     if (_totalHits >= _hitsNeededForNextOrbit()) _addPlanet();
 
-    _targetIndex = _nextTargetIndex();
-    _currentGateAngle = _nextGateAngle();
+    // Orbit Rush: top up gates immediately so the player NEVER waits.
+    // _updateGates will also handle this on the next frame, but doing it
+    // here avoids any visible gap.
+    int safety = 3;
+    while (_gates.length < _maxGatesTotal() && safety > 0) {
+      if (!_spawnGate()) break;
+      safety--;
+    }
+
     _maybeMakeTargetGolden();
   }
 
@@ -1388,6 +1726,8 @@ class _GameScreenState extends State<GameScreen>
                     shakeOffset: _shakeOffset(),
                     popups: _popups,
                     demoPlanetAngle: _demoPlanetAngle,
+                    gates: _gates,
+                    comboMeter: _comboMeter,
                   ),
                 ),
                 SafeArea(
@@ -1506,6 +1846,39 @@ class _GameScreenState extends State<GameScreen>
                                       ),
                                     ),
                                   ],
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        // Combo Meter bar — drains over time, refills on hit.
+                        // Visible pressure feedback: keeps the player moving.
+                        const SizedBox(height: 6),
+                        AnimatedOpacity(
+                          opacity: comboActive ? 1 : 0,
+                          duration: const Duration(milliseconds: 140),
+                          child: SizedBox(
+                            width: 180,
+                            height: 6,
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(3),
+                              child: Stack(
+                                children: [
+                                  Container(color: Colors.white12),
+                                  FractionallySizedBox(
+                                    widthFactor: _comboMeter.clamp(0.0, 1.0),
+                                    child: Container(
+                                      decoration: BoxDecoration(
+                                        color: comboColor,
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: comboColor.withOpacity(0.6),
+                                            blurRadius: 8,
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
                                 ],
                               ),
                             ),
@@ -1746,6 +2119,8 @@ class TapOrbitPainter extends CustomPainter {
     required this.shakeOffset,
     required this.popups,
     required this.demoPlanetAngle,
+    required this.gates,
+    required this.comboMeter,
   });
 
   final List<OrbitPlanet> planets;
@@ -1776,6 +2151,8 @@ class TapOrbitPainter extends CustomPainter {
   final Offset shakeOffset;
   final List<ScorePopup> popups;
   final double demoPlanetAngle;
+  final List<Gate> gates;
+  final double comboMeter;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -2214,12 +2591,12 @@ class TapOrbitPainter extends CustomPainter {
   }
 
   void _paintOrbitGates(Canvas canvas, Size size, Offset center) {
+    // 1. Paint all orbit rings (with beat pulse) for ALL planets
     for (final planet in planets) {
       final active = planet.index == targetIndex;
       final radius = _orbitRadiusFor(planet.index, size);
       final color = planet.color;
 
-      // Beat-synced orbit ring: brightens slightly on each beat
       final beatBoost = 0.05 * beatPulse;
       canvas.drawCircle(
         center,
@@ -2228,68 +2605,129 @@ class TapOrbitPainter extends CustomPainter {
           ..style = PaintingStyle.stroke
           ..strokeWidth = active ? 1.5 : 0.8
           ..color = color.withOpacity(
-              (active ? 0.20 : 0.08) + beatBoost,
-            ),
+            (active ? 0.20 : 0.08) + beatBoost,
+          ),
       );
+    }
 
-      if (!active) continue;
+    // 2. Paint every active Orbit Rush gate on its own orbit
+    for (final gate in gates) {
+      if (gate.planetIndex < 0 || gate.planetIndex >= planets.length) continue;
+      final planet = planets[gate.planetIndex];
+      final radius = _orbitRadiusFor(gate.planetIndex, size);
+      _paintSingleGate(canvas, center, radius, gate, planet);
+    }
+  }
 
-      var rawDistance = (planet.angle - gateAngle).abs() % (pi * 2);
-      if (rawDistance > pi) rawDistance = pi * 2 - rawDistance;
-      final approach = (1.0 - (rawDistance / 0.9)).clamp(0.0, 1.0);
-      final eased = approach * approach * (3 - 2 * approach);
-      final markerFade = (1.0 - approach * 1.4).clamp(0.0, 1.0);
+  /// Renders one Orbit Rush gate with lifetime fade + bonus styling +
+  /// "incoming planet" approach glow.
+  void _paintSingleGate(
+    Canvas canvas,
+    Offset center,
+    double radius,
+    Gate gate,
+    OrbitPlanet planet,
+  ) {
+    final isFocus = gate.planetIndex == targetIndex;
+    final remaining = gate.lifeRemaining;
+    final urgency = 1.0 - remaining; // 0 fresh, 1 about to die
 
-      final rect = Rect.fromCircle(center: center, radius: radius);
+    // Approach (planet → gate)
+    var rawDistance = (planet.angle - gate.angle).abs() % (pi * 2);
+    if (rawDistance > pi) rawDistance = pi * 2 - rawDistance;
+    final approach = (1.0 - (rawDistance / 0.9)).clamp(0.0, 1.0);
+    final eased = approach * approach * (3 - 2 * approach);
 
+    final color = gate.color;
+    final rect = Rect.fromCircle(center: center, radius: radius);
+
+    // Outer glow halo — pulses with beat + planet approach + focus
+    final haloAlpha = (0.10 +
+            eased * 0.10 +
+            (isFocus ? gatePulse * 0.10 : 0) +
+            beatPulse * 0.05) *
+        (0.45 + remaining * 0.55);
+    final haloWidth =
+        12 + (isFocus ? gatePulse * 6 : 0) + beatPulse * 2 + (gate.isBonus ? 2 : 0);
+    canvas.drawArc(
+      rect,
+      gate.angle - gate.halfWidth,
+      gate.halfWidth * 2,
+      false,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeWidth = haloWidth
+        ..color = color.withOpacity(haloAlpha)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 12),
+    );
+
+    // Main band — thicker for bonus, fades with urgency
+    final bandWidth = (gate.isBonus ? 5.5 : 4.5) * (0.6 + remaining * 0.4);
+    final bandOpacity = ((gate.isBonus ? 0.85 : 0.62) * (0.5 + remaining * 0.5) +
+            eased * 0.20)
+        .clamp(0.0, 1.0);
+    canvas.drawArc(
+      rect,
+      gate.angle - gate.halfWidth,
+      gate.halfWidth * 2,
+      false,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeWidth = bandWidth
+        ..color = color.withOpacity(bandOpacity),
+    );
+
+    // Perfect zone (white sliver) on focused gate
+    if (isFocus) {
+      final perfectAbs =
+          (perfectWindow * (gate.isBonus ? 0.7 : 1.0)).clamp(0.02, gate.halfWidth);
       canvas.drawArc(
         rect,
-        gateAngle - hitWindow,
-        hitWindow * 2,
-        false,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeCap = StrokeCap.round
-          ..strokeWidth = 12 + gatePulse * 6 + frenzy * 2.4 + beatPulse * 3
-          ..color = color.withOpacity(
-            0.10 +
-                eased * 0.10 +
-                gatePulse * 0.15 +
-                frenzy * 0.08 +
-                beatPulse * 0.07,
-          )
-          ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 14),
-      );
-
-      canvas.drawArc(
-        rect,
-        gateAngle - hitWindow,
-        hitWindow * 2,
-        false,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeCap = StrokeCap.round
-          ..strokeWidth = 4.5
-          ..color = color.withOpacity(0.55 + eased * 0.30 + frenzy * 0.08),
-      );
-
-      canvas.drawArc(
-        rect,
-        gateAngle - perfectWindow,
-        perfectWindow * 2,
+        gate.angle - perfectAbs,
+        perfectAbs * 2,
         false,
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeCap = StrokeCap.round
           ..strokeWidth = 2.2
-          ..color = Colors.white.withOpacity(0.85),
+          ..color = Colors.white.withOpacity(0.85 * (0.5 + remaining * 0.5)),
       );
+    }
 
-      _drawBoundaryTick(canvas, center, radius, gateAngle - hitWindow, color);
-      _drawBoundaryTick(canvas, center, radius, gateAngle + hitWindow, color);
+    // Boundary ticks — subtle radial marks at the gate edges
+    final tickColor = color.withOpacity(remaining);
+    _drawBoundaryTick(canvas, center, radius, gate.angle - gate.halfWidth, tickColor);
+    _drawBoundaryTick(canvas, center, radius, gate.angle + gate.halfWidth, tickColor);
 
-      if (markerFade > 0.05)
-        _drawPerfectPip(canvas, center, radius, color, markerFade);
+    // Bonus shimmer
+    if (gate.isBonus) {
+      final spark = sin(time * 9 + gate.age * 4) * 0.5 + 0.5;
+      final cx = center.dx + cos(gate.angle) * radius;
+      final cy = center.dy + sin(gate.angle) * radius;
+      canvas.drawCircle(
+        Offset(cx, cy),
+        3.0 + spark * 1.5,
+        Paint()..color = Colors.white.withOpacity(0.9 * remaining),
+      );
+    }
+
+    // Urgency warning when nearly dead
+    if (urgency > 0.7) {
+      final warn = (urgency - 0.7) / 0.3;
+      canvas.drawArc(
+        rect,
+        gate.angle - gate.halfWidth,
+        gate.halfWidth * 2,
+        false,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round
+          ..strokeWidth = 8
+          ..color = const Color(0xFFFF6680).withOpacity(0.35 * warn)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 8),
+      );
     }
   }
 
@@ -3135,6 +3573,38 @@ class OrbitPlanet {
 enum PlanetPattern { bands, craters, core, storm }
 
 enum GamePhase { intro, playing, gameOver }
+
+enum GateType { normal, bonus }
+
+/// One Orbit Rush gate — a finite-lifetime hit zone bound to a specific
+/// orbit/planet. Multiple gates can coexist on the same orbit (separated
+/// by [`_GameScreenState._minAngularSeparation`]) or on different orbits.
+class Gate {
+  Gate({
+    required this.planetIndex,
+    required this.angle,
+    required this.halfWidth,
+    required this.lifetime,
+    required this.color,
+    this.type = GateType.normal,
+  });
+
+  final int planetIndex;
+  double angle;
+  final double halfWidth;
+  final double lifetime;
+  double age = 0;
+  final GateType type;
+  Color color;
+  bool consumed = false;
+
+  /// 1.0 fresh → 0.0 about to die.
+  double get lifeRemaining =>
+      (1.0 - (age / lifetime).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+
+  bool get isDead => age >= lifetime || consumed;
+  bool get isBonus => type == GateType.bonus;
+}
 
 class PlanetStyle {
   const PlanetStyle({
