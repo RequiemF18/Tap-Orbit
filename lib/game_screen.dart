@@ -309,6 +309,7 @@ class _GameScreenState extends State<GameScreen>
     _recentSpawnPlanetIndices.clear();
     _comboMeter = 1.0;
     _lastBeatSpawnGuardS = 0;
+    _respawnDelayRemainingS = 0;
     _addPlanet();
   }
 
@@ -522,41 +523,53 @@ class _GameScreenState extends State<GameScreen>
   /// difficulty so early game stays clean and readable.
   ///
   /// Score 0-9   → 1 (one barra por órbita)
-  /// Score 10-24 → 1 (still strict, just more total)
-  /// Score 25-49 → 2 (DRIFT — can stack, but with separation)
-  /// Score 50-99 → 2 (FLUX still 2)
-  /// Score 100+  → 3 (SINGULARITY — full chaos)
+  /// Maximum gates allowed on the SAME orbit at once.
+  /// Stays at 1 for the entire early/mid game so the player never sees
+  /// "two stacked bars" on the same orbit until the score really demands it.
+  ///
+  /// Score 0-69  → 1 (one bar per orbit, period)
+  /// Score 70+   → 2 (only late game allows stacking)
   int _maxGatesPerOrbit() {
-    if (_score >= 100) return 3;
-    if (_score >= 25) return 2;
+    if (_score >= 70) return 2;
     return 1;
   }
 
-  /// Total gates allowed in scene at once. Drives perceived intensity.
-  /// Score 0-9   → 1 (one bar visible at a time)
-  /// Score 10-24 → 2
-  /// Score 25-49 → 3
-  /// Score 50+   → 4-5
+  /// HARD cap on total gates in scene. Special events (bonus on snares,
+  /// late-game pressure) can push the count up to this value, but the
+  /// default top-up never exceeds [_baseTargetGates].
+  ///
+  /// Score 0-14   → 1  (single gate, period — clarity wins)
+  /// Score 15-69  → 2  (1 normally, 2 only on rare events)
+  /// Score 70+    → 3  (2 normally, 3 only on rare events)
   int _maxGatesTotal() {
-    if (_score >= 100) return 5;
-    if (_score >= 50) return 4;
-    if (_score >= 25) return 3;
-    if (_score >= 10) return 2;
+    if (_score >= 70) return 3;
+    if (_score >= 15) return 2;
+    return 1;
+  }
+
+  /// The "default" number of gates we keep on screen at all times.
+  /// This is the value [_updateGates] tops up to every frame.
+  /// Special events (bonus spawn) can briefly exceed it, but never the
+  /// hard cap [_maxGatesTotal].
+  ///
+  /// Design: "almost always one bar — but it appears fast, moves, has pressure".
+  int _baseTargetGates() {
+    if (_score >= 70) return 2;
     return 1;
   }
 
   /// Minimum angular separation (radians) between gates on the SAME orbit.
-  /// Higher = cleaner visuals. Never below 30°.
+  /// Higher = cleaner visuals. Never matters at score < 70 because per-orbit
+  /// cap is 1, but kept here for late game where stacking is allowed.
   ///
-  /// Score 0-24  → 90°  (1.57 rad) — only ever 1 per orbit anyway
-  /// Score 25-49 → 60°  (1.05 rad)
-  /// Score 50-99 → 45°  (0.79 rad)
-  /// Score 100+  → 35°  (0.61 rad)
+  /// Score 0-14   → 120°  (2.09 rad) — irrelevant (only 1 gate ever)
+  /// Score 15-34  → 90°   (1.57 rad)
+  /// Score 35-69  → 90°   (1.57 rad)
+  /// Score 70+    → 60°   (1.05 rad)
   double _minAngularSeparation() {
-    if (_score >= 100) return pi / 5.1;     // ~35°
-    if (_score >= 50) return pi / 4.0;       // 45°
-    if (_score >= 25) return pi / 3.0;       // 60°
-    return pi / 2.0;                         // 90°
+    if (_score >= 70) return pi / 3.0;       // 60°
+    if (_score >= 15) return pi / 2.0;       // 90°
+    return 2 * pi / 3;                       // 120°
   }
 
   /// Wraps an angle to [-pi, pi].
@@ -566,12 +579,24 @@ class _GameScreenState extends State<GameScreen>
     return a;
   }
 
-  /// Lifetime of a freshly spawned gate (seconds). Shrinks with tier.
+  /// Lifetime of a freshly spawned gate (seconds), score-driven curve.
+  /// Faster gates at higher score = more pressure without adding count.
+  ///
+  /// Score 0-14   → 2.2 s   (calm, lets the player learn the rhythm)
+  /// Score 15-69  → 1.8 s   (tighter window — keeps action flowing)
+  /// Score 70+    → 1.3 s   (fast — late-game crunch)
+  /// Bonus gates always 70% of base — extra urgency.
   double _gateLifetime({bool bonus = false}) {
-    final t = (_milestoneTier / 4.0).clamp(0.0, 1.0);
-    final base = lerpDouble(gateLifetimeBase, gateLifetimeMin, t)!;
+    final base = _score >= 70 ? 1.3 : (_score >= 15 ? 1.8 : 2.2);
     return bonus ? base * 0.7 : base;
   }
+
+  /// Brief breathing space after a hit before the next gate spawns.
+  /// Without this, gates appear instantly and the player can't FEEL the
+  /// hit register. 150ms is short enough to feel snappy, long enough
+  /// to read as a discrete event.
+  static const double respawnDelayS = 0.15;
+  double _respawnDelayRemainingS = 0;
 
   /// How many of the last N spawns went to a given orbit.
   int _recentSpawnsOn(int planetIndex) {
@@ -686,17 +711,24 @@ class _GameScreenState extends State<GameScreen>
     return true;
   }
 
-  /// Per-frame gate engine: ages gates, removes dead ones, tops up to
-  /// [_maxGatesTotal], and sprinkles bonus gates on strong music beats.
+  /// Per-frame gate engine — single-active-target by default.
+  ///
+  /// Design: keep [_baseTargetGates] gates on screen at all times (almost
+  /// always = 1). Special events (bonus on snare, late-game pressure) can
+  /// briefly push the count up to [_maxGatesTotal], but never beyond.
+  ///
+  /// After a successful hit there's a brief [respawnDelayS] so the player
+  /// can FEEL the hit register before the next bar appears.
   void _updateGates(double dt) {
-    // 1. Age all gates and collect dead ones
+    // 1. Age all gates, collect dead
     final dead = <Gate>[];
     for (final g in _gates) {
       g.age += dt;
       if (g.isDead) dead.add(g);
     }
 
-    // 2. Punish letting an active gate expire (combo meter takes a hit)
+    // 2. Letting an active gate expire untouched is mild punishment
+    //    (combo meter dings, no life lost — this is pressure, not death).
     for (final d in dead) {
       if (!d.consumed) {
         _comboMeter = max(0, _comboMeter - 0.18);
@@ -704,21 +736,34 @@ class _GameScreenState extends State<GameScreen>
     }
     _gates.removeWhere(dead.contains);
 
-    // 3. Top up scene to desired total — distributed across orbits
-    int safety = 4;
-    while (_gates.length < _maxGatesTotal() && safety > 0) {
-      if (!_spawnGate()) break;
-      safety--;
+    // 3. Respawn delay tick down — gives a beat of breathing room after hits
+    if (_respawnDelayRemainingS > 0) {
+      _respawnDelayRemainingS -= dt;
     }
 
-    // 4. Beat-synced bonus gate (only score >= 8, only on strong snares)
+    // 4. Top up to BASE target (NOT max) — keeps the screen calm.
+    //    Special events below can push us briefly higher.
+    if (_respawnDelayRemainingS <= 0) {
+      int safety = 3;
+      while (_gates.length < _baseTargetGates() && safety > 0) {
+        if (!_spawnGate()) break;
+        safety--;
+      }
+    }
+
+    // 5. Bonus gate as a special event:
+    //    - Only at score ≥ 35 (mid-game and beyond)
+    //    - Only if room exists (current count < hard cap)
+    //    - Probabilistic (35%) with a 1.6s cooldown — feels rare/special
     _lastBeatSpawnGuardS += dt;
-    if (_lastBeatSpawnGuardS > 0.9 &&
-        _score >= 8 &&
+    if (_score >= 35 &&
+        _gates.length < _maxGatesTotal() &&
+        _lastBeatSpawnGuardS > 1.6 &&
+        _respawnDelayRemainingS <= 0 &&
         _random.nextDouble() < 0.35) {
-      // Without a real beatmap-loaded service we just gate by interval.
-      _spawnGate(type: GateType.bonus);
-      _lastBeatSpawnGuardS = 0;
+      if (_spawnGate(type: GateType.bonus)) {
+        _lastBeatSpawnGuardS = 0;
+      }
     }
   }
 
@@ -1342,7 +1387,7 @@ class _GameScreenState extends State<GameScreen>
           );
         }
       });
-      _triggerShake(6.5);
+      _triggerShake(4.0); // ignition shockwave — reduced from 6.5
       HapticFeedback.mediumImpact();
       AudioService.playTap();
       AudioService.playPerfect();
@@ -1424,7 +1469,8 @@ class _GameScreenState extends State<GameScreen>
     if (_isLastLife) gain += 1;
     _score += gain;
 
-    // ----- Golden cleanup -----
+    // ----- Hit feedback (toned down for clarity over noise) -----
+    // Special events (golden, bonus) keep punch; normal hits stay subtle.
     if (wasGolden) {
       _resetGolden(planet);
       _feedbackText = 'GOLDEN!';
@@ -1432,36 +1478,36 @@ class _GameScreenState extends State<GameScreen>
       _spawnBurst(
         impact,
         const Color(0xFFFFD24D),
-        38,
-        outwardPower: 220,
+        22,                      // 38 → 22
+        outwardPower: 180,       // 220 → 180
       );
       _flashColor = const Color(0xFFFFE48A);
-      _flashOpacity = 0.55;
-      _triggerShake(8.0);
+      _flashOpacity = 0.42;       // 0.55 → 0.42
+      _triggerShake(5.0);          // 8.0 → 5.0
     } else if (wasBonus) {
       _feedbackText = 'BONUS!';
       _feedbackColor = const Color(0xFFFFD24D);
       _flashColor = const Color(0xFFFFE48A);
-      _flashOpacity = 0.55;
+      _flashOpacity = 0.42;       // 0.55 → 0.42
       _spawnBurst(
         impact,
         const Color(0xFFFFD24D),
-        38,
-        outwardPower: 220,
+        22,                      // 38 → 22
+        outwardPower: 180,       // 220 → 180
       );
-      _triggerShake(7.0);
+      _triggerShake(4.5);          // 7.0 → 4.5
     } else {
       _feedbackText = perfect ? 'PERFECT' : 'NICE';
       _feedbackColor = planet.color;
       _flashColor = Colors.white;
-      _flashOpacity = perfect ? 0.38 : 0.26;
+      _flashOpacity = perfect ? 0.28 : 0.16; // 0.38/0.26 → 0.28/0.16
       _spawnBurst(
         impact,
         planet.color,
-        perfect ? 30 : 20,
-        outwardPower: perfect ? 190 : 145,
+        perfect ? 16 : 10,       // 30/20 → 16/10
+        outwardPower: perfect ? 150 : 110, // 190/145 → 150/110
       );
-      _triggerShake(perfect ? 4.5 : 2.0);
+      _triggerShake(perfect ? 2.6 : 1.0);   // 4.5/2.0 → 2.6/1.0
     }
     _feedbackAge = 0;
 
@@ -1522,8 +1568,8 @@ class _GameScreenState extends State<GameScreen>
         _resurrectionAnnouncement = 'RESURRECTION';
         _resurrectionAge = 0;
         _flashColor = const Color(0xFFFFE48A);
-        _flashOpacity = 0.78;
-        _triggerShake(10.0);
+        _flashOpacity = 0.62;        // 0.78 → 0.62
+        _triggerShake(6.5);          // 10.0 → 6.5 (still big, it's resurrection)
         AudioService.playCombo();
         AudioService.playPerfect();
         _spawnBurst(
@@ -1543,14 +1589,9 @@ class _GameScreenState extends State<GameScreen>
     // ----- Spawning new orbits -----
     if (_totalHits >= _hitsNeededForNextOrbit()) _addPlanet();
 
-    // Orbit Rush: top up gates immediately so the player NEVER waits.
-    // _updateGates will also handle this on the next frame, but doing it
-    // here avoids any visible gap.
-    int safety = 3;
-    while (_gates.length < _maxGatesTotal() && safety > 0) {
-      if (!_spawnGate()) break;
-      safety--;
-    }
+    // Brief respawn delay so the hit FEELS like a discrete event.
+    // _updateGates picks up the spawn after the delay expires.
+    _respawnDelayRemainingS = respawnDelayS;
 
     _maybeMakeTargetGolden();
   }
@@ -1568,11 +1609,11 @@ class _GameScreenState extends State<GameScreen>
     _feedbackAge = 0;
     if (shatter) {
       _shatterAge = 0;
-      _triggerShake(12.0);
+      _triggerShake(8.0);          // 12 → 8 (still heavy, it's a real loss)
       HapticFeedback.heavyImpact();
       AudioService.playGameOver();
     } else {
-      _triggerShake(5.0);
+      _triggerShake(3.0);          // 5 → 3 (subtle bump for a normal miss)
       HapticFeedback.mediumImpact();
     }
     if (_screenSize != Size.zero) {
