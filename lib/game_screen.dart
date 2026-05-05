@@ -523,54 +523,56 @@ class _GameScreenState extends State<GameScreen>
   /// difficulty so early game stays clean and readable.
   ///
   /// Score 0-9   → 1 (one barra por órbita)
-  /// Maximum gates allowed on the SAME orbit at once.
-  /// Stays at 1 for the entire early/mid game so the player never sees
-  /// "two stacked bars" on the same orbit until the score really demands it.
+  /// HARD design rule — there is ONLY EVER 1 active bar in the scene.
+  /// All progression comes from speed, lifetime, position change, perfect
+  /// zone shrinking, combo pressure, and gate movement at high scores.
   ///
-  /// Score 0-69  → 1 (one bar per orbit, period)
-  /// Score 70+   → 2 (only late game allows stacking)
-  int _maxGatesPerOrbit() {
-    if (_score >= 70) return 2;
-    return 1;
+  /// **Never spawn a second gate while the first is still alive.**
+  static const int maxActiveTargetBars = 1;
+
+  /// One bar per orbit at all times (and there's only ever one bar total
+  /// anyway, so this is doubly enforced).
+  int _maxGatesPerOrbit() => 1;
+
+  /// Hard cap on total gates in scene = always 1.
+  int _maxGatesTotal() => maxActiveTargetBars;
+
+  /// Default top-up target = 1.
+  int _baseTargetGates() => maxActiveTargetBars;
+
+  /// Min angular separation is irrelevant when there's only ever 1 gate,
+  /// but kept here in case future events need it.
+  double _minAngularSeparation() => pi / 2; // 90° (placeholder, unused)
+
+  /// Respawn delay curve — small breath after a hit before the next bar
+  /// spawns. Shorter at higher scores keeps the action snappy.
+  ///
+  /// Score 0-9   → 250 ms  (calm)
+  /// Score 10-29 → 180 ms
+  /// Score 30+   → 120 ms  (fast)
+  double _targetRespawnDelay() {
+    if (_score < 10) return 0.250;
+    if (_score < 30) return 0.180;
+    return 0.120;
   }
 
-  /// HARD cap on total gates in scene. Special events (bonus on snares,
-  /// late-game pressure) can push the count up to this value, but the
-  /// default top-up never exceeds [_baseTargetGates].
+  /// Perfect-zone width scale — shrinks as the score grows. Player feels
+  /// progression as the white sliver gets harder to nail.
   ///
-  /// Score 0-14   → 1  (single gate, period — clarity wins)
-  /// Score 15-69  → 2  (1 normally, 2 only on rare events)
-  /// Score 70+    → 3  (2 normally, 3 only on rare events)
-  int _maxGatesTotal() {
-    if (_score >= 70) return 3;
-    if (_score >= 15) return 2;
-    return 1;
+  /// Score 0-9   → 1.00
+  /// Score 10-29 → 0.85
+  /// Score 30-59 → 0.70
+  /// Score 60+   → 0.60
+  double _perfectZoneScale() {
+    if (_score < 10) return 1.00;
+    if (_score < 30) return 0.85;
+    if (_score < 60) return 0.70;
+    return 0.60;
   }
 
-  /// The "default" number of gates we keep on screen at all times.
-  /// This is the value [_updateGates] tops up to every frame.
-  /// Special events (bonus spawn) can briefly exceed it, but never the
-  /// hard cap [_maxGatesTotal].
-  ///
-  /// Design: "almost always one bar — but it appears fast, moves, has pressure".
-  int _baseTargetGates() {
-    if (_score >= 70) return 2;
-    return 1;
-  }
-
-  /// Minimum angular separation (radians) between gates on the SAME orbit.
-  /// Higher = cleaner visuals. Never matters at score < 70 because per-orbit
-  /// cap is 1, but kept here for late game where stacking is allowed.
-  ///
-  /// Score 0-14   → 120°  (2.09 rad) — irrelevant (only 1 gate ever)
-  /// Score 15-34  → 90°   (1.57 rad)
-  /// Score 35-69  → 90°   (1.57 rad)
-  /// Score 70+    → 60°   (1.05 rad)
-  double _minAngularSeparation() {
-    if (_score >= 70) return pi / 3.0;       // 60°
-    if (_score >= 15) return pi / 2.0;       // 90°
-    return 2 * pi / 3;                       // 120°
-  }
+  /// True once the bar is allowed to drift — late-game polish that adds
+  /// pressure without adding more bars.
+  bool _targetCanMove() => _score >= 35;
 
   /// Wraps an angle to [-pi, pi].
   double _wrapAngleSigned(double a) {
@@ -580,22 +582,21 @@ class _GameScreenState extends State<GameScreen>
   }
 
   /// Lifetime of a freshly spawned gate (seconds), score-driven curve.
-  /// Faster gates at higher score = more pressure without adding count.
+  /// Pressure rises through SHORTER bars, not MORE bars.
   ///
-  /// Score 0-14   → 2.2 s   (calm, lets the player learn the rhythm)
-  /// Score 15-69  → 1.8 s   (tighter window — keeps action flowing)
-  /// Score 70+    → 1.3 s   (fast — late-game crunch)
-  /// Bonus gates always 70% of base — extra urgency.
+  /// Score 0-9   → 2.4 s   (relaxed — learning the timing)
+  /// Score 10-29 → 1.9 s
+  /// Score 30-59 → 1.5 s
+  /// Score 60+   → 1.2 s   (late-game crunch)
   double _gateLifetime({bool bonus = false}) {
-    final base = _score >= 70 ? 1.3 : (_score >= 15 ? 1.8 : 2.2);
-    return bonus ? base * 0.7 : base;
+    if (_score < 10) return 2.4;
+    if (_score < 30) return 1.9;
+    if (_score < 60) return 1.5;
+    return 1.2;
   }
 
-  /// Brief breathing space after a hit before the next gate spawns.
-  /// Without this, gates appear instantly and the player can't FEEL the
-  /// hit register. 150ms is short enough to feel snappy, long enough
-  /// to read as a discrete event.
-  static const double respawnDelayS = 0.15;
+  /// Tracks the breathing space after a hit before the next gate spawns.
+  /// Set by [_handleGateHit] using [_targetRespawnDelay()].
   double _respawnDelayRemainingS = 0;
 
   /// How many of the last N spawns went to a given orbit.
@@ -678,11 +679,16 @@ class _GameScreenState extends State<GameScreen>
     return null;
   }
 
-  /// Spawns a single gate on a balanced-chosen orbit at a non-overlapping
-  /// angle. Respects [_maxGatesTotal]. Returns true if a gate was actually
-  /// added.
+  /// Spawns the SINGLE active bar on a balanced-chosen orbit.
+  ///
+  /// Always respects [maxActiveTargetBars] = 1: if a gate is already alive
+  /// in the scene, this returns false without doing anything.
+  ///
+  /// Centralized — every spawn path (top-up, post-hit, post-miss) goes
+  /// through here. There is NO other place that creates [Gate]s.
   bool _spawnGate({GateType type = GateType.normal}) {
-    if (_gates.length >= _maxGatesTotal()) return false;
+    // Hard rule: never have more than 1 active bar.
+    if (_gates.length >= maxActiveTargetBars) return false;
 
     final orbit = _chooseSpawnOrbit();
     if (orbit == null) return false;
@@ -690,19 +696,30 @@ class _GameScreenState extends State<GameScreen>
     final angle = _findValidGateAngle(orbit);
     if (angle == null) return false;
 
-    final isBonus = type == GateType.bonus;
-    final width = isBonus ? hitWindow * bonusGateWidthMult : hitWindow;
+    // Late-game drift — bar slowly moves along the orbit (rad/s).
+    // Direction is random; magnitude scales with score above 35.
+    double drift = 0;
+    if (_targetCanMove()) {
+      final t = ((_score - 35) / 60).clamp(0.0, 1.0); // 35→0, 95+→1
+      final magnitude = lerpDouble(0.18, 0.55, t)!;   // ~10°/s → ~31°/s
+      drift = (_random.nextBool() ? 1 : -1) * magnitude;
+    }
 
     _gates.add(
       Gate(
         planetIndex: orbit.index,
         angle: angle,
-        halfWidth: width,
-        lifetime: _gateLifetime(bonus: isBonus),
-        color: isBonus ? const Color(0xFFFFD24D) : orbit.color,
-        type: type,
+        halfWidth: hitWindow,
+        lifetime: _gateLifetime(),
+        color: orbit.color,
+        type: GateType.normal, // bonus gates disabled — single-bar design
+        driftSpeed: drift,
       ),
     );
+
+    // The HUD active color follows the bar's orbit so the player always
+    // knows which planet the current bar belongs to.
+    _targetIndex = orbit.index;
 
     _recentSpawnPlanetIndices.add(orbit.index);
     while (_recentSpawnPlanetIndices.length > recentSpawnHistorySize) {
@@ -711,23 +728,24 @@ class _GameScreenState extends State<GameScreen>
     return true;
   }
 
-  /// Per-frame gate engine — single-active-target by default.
+  /// Per-frame gate engine — STRICT single-active-target.
   ///
-  /// Design: keep [_baseTargetGates] gates on screen at all times (almost
-  /// always = 1). Special events (bonus on snare, late-game pressure) can
-  /// briefly push the count up to [_maxGatesTotal], but never beyond.
-  ///
-  /// After a successful hit there's a brief [respawnDelayS] so the player
-  /// can FEEL the hit register before the next bar appears.
+  /// Design: there is ALWAYS exactly 1 bar in the scene (or 0 during the
+  /// brief respawn delay after a hit). Difficulty rises through speed,
+  /// shorter lifetime, perfect-zone shrinking, drift, and combo pressure —
+  /// never through more bars.
   void _updateGates(double dt) {
-    // 1. Age all gates, collect dead
+    // 1. Age + drift all gates
     final dead = <Gate>[];
     for (final g in _gates) {
       g.age += dt;
+      if (g.driftSpeed != 0) {
+        g.angle = _wrapAngleSigned(g.angle + g.driftSpeed * dt);
+      }
       if (g.isDead) dead.add(g);
     }
 
-    // 2. Letting an active gate expire untouched is mild punishment
+    // 2. Letting an active bar expire untouched is mild punishment
     //    (combo meter dings, no life lost — this is pressure, not death).
     for (final d in dead) {
       if (!d.consumed) {
@@ -736,35 +754,19 @@ class _GameScreenState extends State<GameScreen>
     }
     _gates.removeWhere(dead.contains);
 
-    // 3. Respawn delay tick down — gives a beat of breathing room after hits
+    // 3. Respawn delay tick down
     if (_respawnDelayRemainingS > 0) {
       _respawnDelayRemainingS -= dt;
     }
 
-    // 4. Top up to BASE target (NOT max) — keeps the screen calm.
-    //    Special events below can push us briefly higher.
-    if (_respawnDelayRemainingS <= 0) {
-      int safety = 3;
-      while (_gates.length < _baseTargetGates() && safety > 0) {
-        if (!_spawnGate()) break;
-        safety--;
-      }
+    // 4. Top up to exactly 1 active bar after the delay expires.
+    if (_respawnDelayRemainingS <= 0 &&
+        _gates.length < maxActiveTargetBars) {
+      _spawnGate();
     }
 
-    // 5. Bonus gate as a special event:
-    //    - Only at score ≥ 35 (mid-game and beyond)
-    //    - Only if room exists (current count < hard cap)
-    //    - Probabilistic (35%) with a 1.6s cooldown — feels rare/special
-    _lastBeatSpawnGuardS += dt;
-    if (_score >= 35 &&
-        _gates.length < _maxGatesTotal() &&
-        _lastBeatSpawnGuardS > 1.6 &&
-        _respawnDelayRemainingS <= 0 &&
-        _random.nextDouble() < 0.35) {
-      if (_spawnGate(type: GateType.bonus)) {
-        _lastBeatSpawnGuardS = 0;
-      }
-    }
+    // (No bonus gates, no beat-synced extras, no event spawns. The single
+    //  active bar is the contract — see [maxActiveTargetBars].)
   }
 
   /// Combo Meter drains over time. If it hits 0 with hitStreak >= 3, the
@@ -1426,7 +1428,8 @@ class _GameScreenState extends State<GameScreen>
       // Update visual focus (HUD color) to follow where the action happened
       _targetIndex = hitPlanet.index;
       // Perfect threshold scales with bonus gates (stricter)
-      final perfectAbs = perfectWindow * (hitGate.isBonus ? 0.7 : 1.0);
+      // Perfect window shrinks with score — same scale used by the painter.
+      final perfectAbs = perfectWindow * _perfectZoneScale();
       final isPerfect = bestDist <= perfectAbs;
       hitGate.consumed = true;
       _gates.remove(hitGate);
@@ -1484,18 +1487,6 @@ class _GameScreenState extends State<GameScreen>
       _flashColor = const Color(0xFFFFE48A);
       _flashOpacity = 0.42;       // 0.55 → 0.42
       _triggerShake(5.0);          // 8.0 → 5.0
-    } else if (wasBonus) {
-      _feedbackText = 'BONUS!';
-      _feedbackColor = const Color(0xFFFFD24D);
-      _flashColor = const Color(0xFFFFE48A);
-      _flashOpacity = 0.42;       // 0.55 → 0.42
-      _spawnBurst(
-        impact,
-        const Color(0xFFFFD24D),
-        22,                      // 38 → 22
-        outwardPower: 180,       // 220 → 180
-      );
-      _triggerShake(4.5);          // 7.0 → 4.5
     } else {
       _feedbackText = perfect ? 'PERFECT' : 'NICE';
       _feedbackColor = planet.color;
@@ -1538,10 +1529,8 @@ class _GameScreenState extends State<GameScreen>
       ScorePopup(
         position: impact,
         value: gain,
-        color: (wasGolden || wasBonus)
-            ? const Color(0xFFFFD24D)
-            : planet.color,
-        golden: wasGolden || wasBonus,
+        color: wasGolden ? const Color(0xFFFFD24D) : planet.color,
+        golden: wasGolden,
       ),
     );
 
@@ -1590,8 +1579,8 @@ class _GameScreenState extends State<GameScreen>
     if (_totalHits >= _hitsNeededForNextOrbit()) _addPlanet();
 
     // Brief respawn delay so the hit FEELS like a discrete event.
-    // _updateGates picks up the spawn after the delay expires.
-    _respawnDelayRemainingS = respawnDelayS;
+    // Curve scales with score (250→180→120 ms).
+    _respawnDelayRemainingS = _targetRespawnDelay();
 
     _maybeMakeTargetGolden();
   }
@@ -1769,6 +1758,7 @@ class _GameScreenState extends State<GameScreen>
                     demoPlanetAngle: _demoPlanetAngle,
                     gates: _gates,
                     comboMeter: _comboMeter,
+                    perfectZoneScale: _perfectZoneScale(),
                   ),
                 ),
                 SafeArea(
@@ -2162,6 +2152,7 @@ class TapOrbitPainter extends CustomPainter {
     required this.demoPlanetAngle,
     required this.gates,
     required this.comboMeter,
+    required this.perfectZoneScale,
   });
 
   final List<OrbitPlanet> planets;
@@ -2194,6 +2185,10 @@ class TapOrbitPainter extends CustomPainter {
   final double demoPlanetAngle;
   final List<Gate> gates;
   final double comboMeter;
+
+  /// Perfect-zone width multiplier — shrinks at higher scores so the white
+  /// sliver gets harder to nail without changing the bar's overall width.
+  final double perfectZoneScale;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -2669,9 +2664,15 @@ class TapOrbitPainter extends CustomPainter {
     Gate gate,
     OrbitPlanet planet,
   ) {
+    // Minimum angular half-width on screen — guarantees the bar looks like
+    // a bar from frame 1, NEVER like a dot. ~9° each side = 18° total span.
+    const minSpawnHalfWidth = 9 * pi / 180; // 0.157 rad
+    final halfWidth = max(gate.halfWidth, minSpawnHalfWidth);
+
     final isFocus = gate.planetIndex == targetIndex;
     final remaining = gate.lifeRemaining;
     final urgency = 1.0 - remaining; // 0 fresh, 1 about to die
+    final spawn = gate.spawnFade;     // 0 fresh-frame → 1 after 120ms
 
     // Approach (planet → gate)
     var rawDistance = (planet.angle - gate.angle).abs() % (pi * 2);
@@ -2682,18 +2683,21 @@ class TapOrbitPainter extends CustomPainter {
     final color = gate.color;
     final rect = Rect.fromCircle(center: center, radius: radius);
 
-    // Outer glow halo — pulses with beat + planet approach + focus
+    // Outer glow halo — beat + approach + focus.
+    // Width is CONSTANT (no spawn scaling) so the halo never starts as a blob.
+    // Opacity fades in via [spawn].
     final haloAlpha = (0.10 +
             eased * 0.10 +
             (isFocus ? gatePulse * 0.10 : 0) +
             beatPulse * 0.05) *
-        (0.45 + remaining * 0.55);
+        (0.45 + remaining * 0.55) *
+        spawn;
     final haloWidth =
         12 + (isFocus ? gatePulse * 6 : 0) + beatPulse * 2 + (gate.isBonus ? 2 : 0);
     canvas.drawArc(
       rect,
-      gate.angle - gate.halfWidth,
-      gate.halfWidth * 2,
+      gate.angle - halfWidth,
+      halfWidth * 2,
       false,
       Paint()
         ..style = PaintingStyle.stroke
@@ -2703,15 +2707,21 @@ class TapOrbitPainter extends CustomPainter {
         ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 12),
     );
 
-    // Main band — thicker for bonus, fades with urgency
-    final bandWidth = (gate.isBonus ? 5.5 : 4.5) * (0.6 + remaining * 0.4);
-    final bandOpacity = ((gate.isBonus ? 0.85 : 0.62) * (0.5 + remaining * 0.5) +
-            eased * 0.20)
+    // Main band — CONSTANT width, fades in via [spawn].
+    // No more `(0.6 + remaining * 0.4)` width modulation that made fresh
+    // bars subtly thicker than older ones (which read as a "growth" effect).
+    const bandWidthBase = 4.5;
+    const bandWidthBonus = 5.5;
+    final bandWidth = gate.isBonus ? bandWidthBonus : bandWidthBase;
+    final bandOpacity = (((gate.isBonus ? 0.88 : 0.72) +
+                eased * 0.20) *
+            (0.55 + remaining * 0.45) *
+            spawn)
         .clamp(0.0, 1.0);
     canvas.drawArc(
       rect,
-      gate.angle - gate.halfWidth,
-      gate.halfWidth * 2,
+      gate.angle - halfWidth,
+      halfWidth * 2,
       false,
       Paint()
         ..style = PaintingStyle.stroke
@@ -2720,53 +2730,44 @@ class TapOrbitPainter extends CustomPainter {
         ..color = color.withOpacity(bandOpacity),
     );
 
-    // Perfect zone (white sliver) on focused gate
-    if (isFocus) {
-      final perfectAbs =
-          (perfectWindow * (gate.isBonus ? 0.7 : 1.0)).clamp(0.02, gate.halfWidth);
-      canvas.drawArc(
-        rect,
-        gate.angle - perfectAbs,
-        perfectAbs * 2,
-        false,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeCap = StrokeCap.round
-          ..strokeWidth = 2.2
-          ..color = Colors.white.withOpacity(0.85 * (0.5 + remaining * 0.5)),
-      );
-    }
+    // Perfect zone (white sliver) — ALWAYS painted on every gate.
+    // Width scales with [perfectZoneScale] (score-driven), opacity fades
+    // in via [spawn]. Never starts at zero width.
+    final perfectAbs =
+        (perfectWindow * perfectZoneScale).clamp(0.04, halfWidth);
+    canvas.drawArc(
+      rect,
+      gate.angle - perfectAbs,
+      perfectAbs * 2,
+      false,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeWidth = 2.4
+        ..color = Colors.white.withOpacity(
+          (0.92 * (0.5 + remaining * 0.5) * spawn).clamp(0.0, 1.0),
+        ),
+    );
 
-    // Boundary ticks — subtle radial marks at the gate edges
-    final tickColor = color.withOpacity(remaining);
-    _drawBoundaryTick(canvas, center, radius, gate.angle - gate.halfWidth, tickColor);
-    _drawBoundaryTick(canvas, center, radius, gate.angle + gate.halfWidth, tickColor);
+    // Boundary ticks — subtle radial marks at the gate edges.
+    // Use the ENFORCED halfWidth so ticks land on the visible band edges.
+    final tickColor = color.withOpacity((remaining * spawn).clamp(0.0, 1.0));
+    _drawBoundaryTick(canvas, center, radius, gate.angle - halfWidth, tickColor);
+    _drawBoundaryTick(canvas, center, radius, gate.angle + halfWidth, tickColor);
 
-    // Bonus shimmer
-    if (gate.isBonus) {
-      final spark = sin(time * 9 + gate.age * 4) * 0.5 + 0.5;
-      final cx = center.dx + cos(gate.angle) * radius;
-      final cy = center.dy + sin(gate.angle) * radius;
-      canvas.drawCircle(
-        Offset(cx, cy),
-        3.0 + spark * 1.5,
-        Paint()..color = Colors.white.withOpacity(0.9 * remaining),
-      );
-    }
-
-    // Urgency warning when nearly dead
+    // Urgency warning when nearly dead — same halfWidth as the band.
     if (urgency > 0.7) {
       final warn = (urgency - 0.7) / 0.3;
       canvas.drawArc(
         rect,
-        gate.angle - gate.halfWidth,
-        gate.halfWidth * 2,
+        gate.angle - halfWidth,
+        halfWidth * 2,
         false,
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeCap = StrokeCap.round
           ..strokeWidth = 8
-          ..color = const Color(0xFFFF6680).withOpacity(0.35 * warn)
+          ..color = const Color(0xFFFF6680).withOpacity(0.35 * warn * spawn)
           ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 8),
       );
     }
@@ -3628,6 +3629,7 @@ class Gate {
     required this.lifetime,
     required this.color,
     this.type = GateType.normal,
+    this.driftSpeed = 0,
   });
 
   final int planetIndex;
@@ -3639,9 +3641,24 @@ class Gate {
   Color color;
   bool consumed = false;
 
+  /// Late-game polish: bar can slowly drift along the orbit (rad/s).
+  /// 0 = stationary. Spawned with non-zero only at score >= 35.
+  /// Adds movement-based pressure without adding more bars.
+  final double driftSpeed;
+
   /// 1.0 fresh → 0.0 about to die.
   double get lifeRemaining =>
       (1.0 - (age / lifetime).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+
+  /// Spawn fade-in: 0 → 1 over the first 120ms of life.
+  /// **Only affects opacity, never angular width** — the bar must look
+  /// like a bar from frame 1, not grow from a dot.
+  double get spawnFade {
+    const fadeDurationS = 0.12; // 120ms
+    final t = (age / fadeDurationS).clamp(0.0, 1.0);
+    // Smoothstep for a clean ramp
+    return t * t * (3 - 2 * t);
+  }
 
   bool get isDead => age >= lifetime || consumed;
   bool get isBonus => type == GateType.bonus;
